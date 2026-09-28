@@ -185,6 +185,36 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
     doc.getElementById("range-val").textContent === "Auto" && doc.getElementById("chart-range").disabled);
   check("modal shows a Fee column", /<th>Fee<\/th>/.test(doc.getElementById("m-greeks").innerHTML));
 
+  console.log("\n────────────────────────────────────────────────────────────\n  UI — order ticket\n────────────────────────────────────────────────────────────");
+  w.eval("selectStrategy('protective_put'); document.getElementById('f-maxloss').value='0';");
+  await sleep(1800);
+  w.eval("openChart(0)");
+  await sleep(400);
+  const ticket = doc.querySelector("#m-greeks table");
+  const headers = [...ticket.querySelectorAll("thead th")].map(t => t.textContent.trim());
+  check("ticket states action, amount, unit price and cash per leg",
+    ["Action", "Instrument", "Amount", "Unit price", "Book", "Cash"].every(hd => headers.includes(hd)),
+    headers.join(" | "));
+  const legRows = [...ticket.querySelectorAll("tbody tr")];
+  const spotRow = legRows.find(tr => /spot/i.test(tr.textContent));
+  check("the underlying leg shows a real amount and price (used to be blank)",
+    !!spotRow && /0\.001\s*BTC/.test(spotRow.textContent) && /\$1[0-9,]{4,}/.test(spotRow.textContent),
+    spotRow ? spotRow.textContent.replace(/\s+/g, " ").trim().slice(0, 90) : "missing");
+  const optRow = legRows.find(tr => /-P\b|-C\b/.test(tr.textContent));
+  check("option legs show which side of the book they execute against",
+    !!optRow && /(ask|bid|mark)/.test(optRow.textContent), optRow?.textContent.replace(/\s+/g, " ").trim().slice(0, 90));
+  check("cash per leg = unit price x amount", (() => {
+    const cs = w.eval("DATA.contract_size"), spot = w.eval("DATA.spot");
+    const want = (spot * cs).toFixed(2);
+    return spotRow.textContent.includes(want.replace(/\B(?=(\d{3})+(?!\d))/g, ","));
+  })(), `expected ${(w.eval("DATA.spot") * w.eval("DATA.contract_size")).toFixed(2)}`);
+  check("a totals row sums the structure",
+    /Net/.test(ticket.querySelector("tbody tr:last-child").textContent));
+  const text = w.eval("orderTicketText(CURR_STRAT, DATA.contract_size)");
+  check("the ticket can be copied as plain text",
+    /BUY/.test(text) && /@ \$/.test(text) && /(Net debit|Net credit)/.test(text),
+    text.split("\n")[1]);
+
   console.log("\n────────────────────────────────────────────────────────────\n  UI — misc\n────────────────────────────────────────────────────────────");
   w.eval("toggleFilterCollapse(true)");
   await sleep(100);

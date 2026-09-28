@@ -2406,6 +2406,146 @@ async function fetchExchangeMargin(){
   }
 }
 
+/* ═══ ORDER TICKET ═══
+   What the trader actually has to do: side, quantity, the price that side of the
+   book is showing, and the cash that moves for each leg. Previously the table only
+   showed a per-unit premium (and nothing at all for a held underlying), so it was
+   impossible to tell how much to buy or at what price. */
+const PRICE_SOURCE_LABEL = { ask: "ask", bid: "bid", mark: "mark", index: "index", none: "—" };
+
+function legOrderRows(s, cs, spot, asset) {
+  return (s.legs_detail || []).map(l => {
+    const isBuy = l.direction === "Buy" || l.direction === "Long";
+    const isUnderlying = l.opt_type === "underlying";
+    const price = isUnderlying ? spot : l.premium;
+    const source = isUnderlying ? "index" : (l.premium_source || "mark");
+    const cash = price * cs * (isBuy ? -1 : 1);          // negative = money out
+    return {
+      leg: l, isBuy, isUnderlying, price, source, cash,
+      qty: cs,
+      qtyLabel: isUnderlying ? `${cs} ${asset}` : `${cs}`,
+      instrument: isUnderlying ? `${asset} spot` : l.name,
+      fee: l.fee || 0,
+    };
+  });
+}
+
+function renderOrderTicket(s, cs) {
+  const ge = document.getElementById("m-greeks");
+  if (!ge) return;
+  if (!s.legs_detail || !s.legs_detail.length) { ge.innerHTML = ""; return; }
+
+  const asset = DATA.asset, spot = DATA.spot;
+  const rows = legOrderRows(s, cs, spot, asset);
+  const netCash = rows.reduce((a, r) => a + r.cash, 0);
+  const totalFee = rows.reduce((a, r) => a + r.fee, 0);
+  const showFees = s.total_fee > 0;
+
+  const money = v => (v < 0 ? "-$" : "$") + fmt(Math.abs(v));
+  const cell = (label, html, extra = "") => `<td data-label="${label}"${extra}>${html}</td>`;
+
+  let h = `<div style="display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;margin:16px 0 10px">
+      <h4 style="color:var(--text-dim);font-size:13px;font-weight:700;margin:0">
+        🧾 Order Ticket — what to trade for ${cs} ${asset} per contract
+      </h4>
+      <button class="chart-btn" onclick="copyOrderTicket()" style="padding:3px 10px;font-size:11px" title="Copy the ticket as text">📋 Copy ticket</button>
+    </div>
+    <div class="tbl-scroll"><table class="g-tbl"><thead><tr>
+      <th>Action</th><th>Instrument</th><th>Amount</th><th>Unit price</th><th>Book</th>
+      <th>Cash</th>${showFees ? "<th>Fee</th>" : ""}
+      <th title="Position greeks: per-unit value x amount x direction">Δ pos</th>
+      <th>Γ pos</th><th>Θ /day</th><th>ν /1%</th><th>IV</th>
+    </tr></thead><tbody>`;
+
+  rows.forEach(r => {
+    const g = r.leg.greeks || {};
+    const sign = r.isBuy ? 1 : -1;
+    const pos = (v, digits) => v === undefined ? "—" : (sign * v * cs).toFixed(digits);
+    const mn = r.leg.moneyness
+      ? `<span class="leg-mn ${r.leg.moneyness.toLowerCase()}">${r.leg.moneyness}</span>` : "";
+    h += "<tr>"
+      + cell("Action", `<span class="leg-dir ${r.isBuy ? "buy" : "sell"}">${r.isBuy ? "BUY" : "SELL"}</span>`)
+      + cell("Instrument", `<span class="ln">${r.instrument}</span> ${mn}`)
+      + cell("Amount", `<b>${r.qtyLabel}</b>${r.isUnderlying ? "" : ` <span style="color:var(--text-mute);font-size:10px">contracts</span>`}`)
+      + cell("Price", `$${fmt(r.price)}`, ' style="font-weight:700"')
+      + cell("Book", `<span style="color:var(--text-mute);font-size:11px">${PRICE_SOURCE_LABEL[r.source] || r.source}</span>`)
+      + cell("Cash", `<span style="color:var(--${r.cash < 0 ? "red" : "green"});font-weight:700">${money(r.cash)}</span>`)
+      + (showFees ? cell("Fee", r.isUnderlying
+          ? `<span style="color:var(--green)">free</span>`
+          : `<span style="color:var(--red)">-$${fmt(r.fee)}</span>`
+            + (r.leg.fee_discount ? ` <span style="color:var(--green);font-size:10px">(-${Math.round(r.leg.fee_discount * 100)}%)</span>` : "")) : "")
+      + cell("Δ pos", pos(g.delta, 4))
+      + cell("Γ pos", r.isUnderlying ? "—" : pos(g.gamma, 6))
+      + cell("Θ /day", r.isUnderlying ? "—" : pos(g.theta, 4))
+      + cell("ν /1%", r.isUnderlying ? "—" : pos(g.vega, 4))
+      + cell("IV", r.isUnderlying || g.iv === undefined ? "—" : (g.iv * 100).toFixed(1) + "%")
+      + "</tr>";
+  });
+
+  const span = showFees ? 5 : 5;
+  h += `<tr style="border-top:2px solid var(--border);font-weight:800;background:var(--bg-card2)">
+      ${cell("Total", `<span style="color:var(--text)">Net</span>`)}
+      <td colspan="${span - 1}" style="color:var(--text-dim)">${netCash < 0 ? "you pay" : "you receive"} for the whole structure</td>
+      ${cell("Cash", `<span style="color:var(--${netCash < 0 ? "red" : "green"})">${money(netCash)}</span>`)}
+      ${showFees ? cell("Fee", `<span style="color:var(--red)">-$${fmt(totalFee)}</span>`) : ""}
+      <td colspan="5" style="color:var(--text-dim);font-weight:600">
+        after fees ${money(netCash - totalFee)} • capital required ${"$" + fmt(s.total_cost)}
+      </td>
+    </tr>`;
+  h += `</tbody></table></div>
+    <div style="font-size:11px;color:var(--text-mute);margin-top:8px;line-height:1.7">
+      Unit price is the executable side of the book (buys lift the <b>ask</b>, sells hit the <b>bid</b>;
+      the underlying is priced at the <b>index</b>). <b>Cash = unit price × amount</b> for that leg —
+      negative means money leaves your account. Greeks are position greeks: already multiplied by the
+      amount and the direction.
+    </div>`;
+  ge.innerHTML = h;
+}
+
+function orderTicketText(s, cs) {
+  const asset = DATA.asset;
+  const rows = legOrderRows(s, cs, DATA.spot, asset);
+  const lines = rows.map(r =>
+    `${(r.isBuy ? "BUY " : "SELL")}  ${r.qtyLabel.padEnd(12)} ${r.instrument.padEnd(28)} @ $${fmt(r.price)} (${r.source})`
+    + `   ${r.cash < 0 ? "-" : "+"}$${fmt(Math.abs(r.cash))}`);
+  const netCash = rows.reduce((a, r) => a + r.cash, 0);
+  return [
+    `${s.name} — ${asset} ${DATA.expiry_display || DATA.expiry} — ${cs} ${asset} per contract`,
+    ...lines,
+    `Net ${netCash < 0 ? "debit" : "credit"}: $${fmt(Math.abs(netCash))}`
+    + (s.total_fee > 0 ? `   Fees: $${fmt(s.total_fee)}` : "")
+    + `   Capital: $${fmt(s.total_cost)}`,
+  ].join("\n");
+}
+
+async function copyOrderTicket() {
+  if (!CURR_STRAT || !DATA) return;
+  const text = orderTicketText(CURR_STRAT, DATA.contract_size);
+  try {
+    await navigator.clipboard.writeText(text);
+    showToast("Order ticket copied");
+  } catch (e) {
+    showToast("Could not copy — select the table instead");
+  }
+}
+
+function showToast(msg) {
+  let t = document.getElementById("mini-toast");
+  if (!t) {
+    t = document.createElement("div");
+    t.id = "mini-toast";
+    t.style.cssText = "position:fixed;bottom:24px;left:50%;transform:translateX(-50%);z-index:10000;"
+      + "background:var(--bg-card2);border:1px solid var(--accent);color:var(--text);padding:8px 16px;"
+      + "border-radius:20px;font-size:12px;font-weight:700;box-shadow:0 8px 30px rgba(0,0,0,.45);"
+      + "opacity:0;transition:opacity .2s";
+    document.body.appendChild(t);
+  }
+  t.textContent = msg;
+  requestAnimationFrame(() => { t.style.opacity = "1"; });
+  clearTimeout(t._hide);
+  t._hide = setTimeout(() => { t.style.opacity = "0"; }, 2200);
+}
+
 function openChart(i){
   if(!DATA||!DATA.strategies[i])return;
   const s=DATA.strategies[i];document.getElementById("overlay").classList.add("on");
@@ -2424,13 +2564,7 @@ function openChart(i){
     <div class="m-card neu" id="m-capital"><div class="lb">Capital</div><div class="vl">$${fmt(s.total_cost)}</div><div class="vl-pct" style="display:flex;align-items:center;gap:6px;justify-content:center;flex-wrap:wrap"><span>estimate</span><button class="chart-btn" id="btn-margin" onclick="fetchExchangeMargin()" title="Ask Derive's margin simulator what this position really requires" style="padding:2px 8px;font-size:10px">⚖️ Exchange margin</button></div></div>
     ${s.total_fee > 0 ? `<div class="m-card loss"><div class="lb">Trading Fees</div><div class="vl">-$${fmt(s.total_fee)}</div><div class="vl-pct">Derive Taker/Spot</div></div>` : ""}
     ${s.breakevens.map(be=>`<div class="m-card neu"><div class="lb">Breakeven</div><div class="vl">$${fmt(be)}</div></div>`).join("")}`;
-  const ge=document.getElementById("m-greeks");
-  if(s.legs_detail?.length){
-    let gh=`<h4 style="margin:16px 0 10px;color:var(--text-dim);font-size:13px;font-weight:700">Leg Details & Greeks</h4><div class="tbl-scroll"><table class="g-tbl"><thead><tr><th>Contract</th><th>Dir</th><th>MN</th><th>Expiry</th><th>Strike</th><th>Premium</th>${s.total_fee > 0 ? '<th>Fee</th>' : ''}<th>Delta</th><th>Gamma</th><th>Theta</th><th>Vega</th><th>IV</th></tr></thead><tbody>`;
-    s.legs_detail.forEach(l=>{const g=l.greeks||{};const mn=l.moneyness?`<span class="leg-mn ${l.moneyness.toLowerCase()}">${l.moneyness}</span>`:"—";
-      const dd=(l.direction==="Buy"||l.direction==="Long")?"Buy":"Sell";
-      gh+=`<tr><td class="ln">${l.name}</td><td>${dd}</td><td>${mn}</td><td>${l.expiry_display}</td><td>${l.opt_type==='underlying'?'—':'$'+fmt(l.strike)}</td><td>${l.opt_type==='underlying'?'—':'$'+l.premium.toFixed(2)}</td>${s.total_fee > 0 ? `<td style="color:var(--red);font-weight:700">-$${l.fee !== undefined ? l.fee.toFixed(2) : '0.00'}</td>` : ''}<td>${g.delta!==undefined?g.delta.toFixed(4):'—'}</td><td>${g.gamma!==undefined?g.gamma.toFixed(6):'—'}</td><td>${g.theta!==undefined?g.theta.toFixed(4):'—'}</td><td>${g.vega!==undefined?g.vega.toFixed(4):'—'}</td><td>${g.iv!==undefined?(g.iv*100).toFixed(1)+'%':'—'}</td></tr>`;
-    });gh+="</tbody></table></div>";ge.innerHTML=gh}else ge.innerHTML="";
+  renderOrderTicket(s, cs);
   {const rv=document.getElementById("chart-range");if(rv){rv.value=CHART_RANGE||SETTINGS.chartRange||30;document.getElementById("range-val").textContent="±"+rv.value+"%"}}
   drawChart(s, parseInt(document.getElementById("chart-range")?.value) || SETTINGS.chartRange || 30);
 }
