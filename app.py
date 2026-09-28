@@ -34,8 +34,10 @@ MAX_CONTRACT_SIZE = 1_000_000
 # Spot:         no maker and no taker fees
 OPTION_TAKER_BASE_FEE = 0.50
 OPTION_TAKER_NOTIONAL_RATE = 0.0003
+OPTION_MAKER_NOTIONAL_RATE = 0.0001
 OPTION_PREMIUM_FEE_CAP = 0.125
 SPOT_TAKER_FEE_RATE = 0.0
+FEE_MODES = ("taker", "maker", "rfq")
 # ═══ CACHE (expires after 5 min) ═══
 _cache = {}
 def cache_get(key, ttl=300):
@@ -421,17 +423,16 @@ def payoff_extremes(legs, spot, contract_size=1, fee=0.0):
     }
 
 
-def option_taker_fee(spot, premium, amount):
-    """Derive option taker fee for one leg.
+def option_variable_fee(spot, premium, amount, taker=True):
+    """Variable part of a Derive option fee for one leg.
 
     https://docs.derive.xyz/reference/fees-1
-        fee = $0.50 base (flat, per order) + min(0.03% x notional, 12.5% x premium)
-    with notional = spot x amount and premium = option price x amount, i.e. only the
-    variable part scales with the traded amount — the base fee does not.
+        taker: min(0.03% x notional, 12.5% x premium)
+        maker: min(0.01% x notional, 12.5% x premium)
+    with notional = spot x amount and premium = option price x amount.
     """
-    variable = min(OPTION_TAKER_NOTIONAL_RATE * spot * amount,
-                   OPTION_PREMIUM_FEE_CAP * premium * amount)
-    return OPTION_TAKER_BASE_FEE + variable
+    rate = OPTION_TAKER_NOTIONAL_RATE if taker else OPTION_MAKER_NOTIONAL_RATE
+    return min(rate * spot * amount, OPTION_PREMIUM_FEE_CAP * premium * amount)
 
 
 def spot_taker_fee(spot, amount):
@@ -439,23 +440,80 @@ def spot_taker_fee(spot, amount):
     return SPOT_TAKER_FEE_RATE * spot * amount
 
 
-def apply_trading_fees(leg_details, spot, contract_size, include_fees=True):
+def rfq_group(leg):
+    """RFQ fee group of a leg: long calls / long puts / short calls / short puts."""
+    side = "long" if leg["direction"] == "Buy" else "short"
+    return f"{side}_{leg['opt_type']}s"
+
+
+def apply_rfq_discounts(fees_by_leg, groups):
+    """Apply Derive's RFQ multi-leg discount to per-leg variable fees.
+
+    Legs are grouped (long calls / long puts / short calls / short puts / perps),
+    the fee is summed per group and the most expensive group always pays in full.
+    Ranked by group total, the remaining groups get: cheapest 100% off, second and
+    third cheapest 50% off, anything else no discount.
+    """
+    totals = {}
+    for idx, group in groups.items():
+        totals[group] = totals.get(group, 0.0) + fees_by_leg[idx]
+    if len(totals) <= 1:
+        return {idx: 1.0 for idx in groups}
+
+    # cheapest first; the most expensive group is excluded from the discount ladder
+    ranked = sorted(totals, key=lambda g: totals[g])[:-1]
+    discount = {}
+    for rank, group in enumerate(ranked):
+        discount[group] = 0.0 if rank == 0 else (0.5 if rank in (1, 2) else 1.0)
+    return {idx: discount.get(group, 1.0) for idx, group in groups.items()}
+
+
+def apply_trading_fees(leg_details, spot, contract_size, include_fees=True, fee_mode="taker"):
     """Attach a per-leg `fee` to leg_details and return their exact total.
 
+    fee_mode:
+      taker  each leg is its own aggressive orderbook order:
+             $0.50 base per leg + the variable taker fee
+      maker  resting limit orders: variable maker fee only, no base fee
+      rfq    one multi-leg quote: variable taker fee per leg with the RFQ group
+             discounts, plus a single $0.50 base fee for the whole structure
+             (attributed to the leg that pays the full fee, so the per-leg column
+             still adds up to the total)
+
     Leg fees are rounded to cents (what actually gets charged) and the total is the
-    sum of those rounded values, so the leg breakdown always adds up to the total
-    shown in the UI.
+    sum of those rounded values, so the breakdown always adds up to the total.
     """
-    total = 0.0
-    for leg in leg_details:
-        if not include_fees:
+    if not include_fees:
+        for leg in leg_details:
             leg["fee"] = 0.0
-            continue
+        return 0.0
+
+    taker = fee_mode != "maker"
+    raw = {}
+    groups = {}
+    for idx, leg in enumerate(leg_details):
         if leg["opt_type"] == "underlying":
-            fee = spot_taker_fee(spot, contract_size)
+            raw[idx] = spot_taker_fee(spot, contract_size)   # spot is free on Derive
         else:
-            fee = option_taker_fee(spot, leg["premium"], contract_size)
+            raw[idx] = option_variable_fee(spot, leg["premium"], contract_size, taker)
+            groups[idx] = rfq_group(leg)
+
+    multipliers = apply_rfq_discounts(raw, groups) if fee_mode == "rfq" else {}
+
+    base_target = None
+    if fee_mode == "rfq" and groups:
+        # the single taker base fee rides along with the most expensive leg
+        base_target = max(groups, key=lambda i: raw[i] * multipliers.get(i, 1.0))
+
+    total = 0.0
+    for idx, leg in enumerate(leg_details):
+        fee = raw[idx] * multipliers.get(idx, 1.0)
+        if fee_mode == "taker" and leg["opt_type"] != "underlying":
+            fee += OPTION_TAKER_BASE_FEE          # one order per leg
+        if idx == base_target:
+            fee += OPTION_TAKER_BASE_FEE          # one order for the whole RFQ
         leg["fee"] = round(fee, 2)
+        leg["fee_discount"] = round(1 - multipliers.get(idx, 1.0), 2) if idx in groups else 0.0
         total += leg["fee"]
     return round(total, 2)
 
@@ -553,6 +611,9 @@ def api_compute():
         strategy_ids=body.get("strategies",[])
         include_fees=bool(body.get("include_fees", True))
         use_mark_prices=bool(body.get("use_mark_prices", False))
+        fee_mode=str(body.get("fee_mode", "taker")).lower()
+        if fee_mode not in FEE_MODES:
+            return jsonify({"error":f"fee_mode must be one of {', '.join(FEE_MODES)}"}),400
         if not expiry: return jsonify({"error":"Select an expiry"}),400
         if not strategy_ids: return jsonify({"error":"Select at least one strategy"}),400
 
@@ -627,7 +688,8 @@ def api_compute():
                         "moneyness":mn})
                 if not calc_legs: continue
 
-                total_fee = apply_trading_fees(leg_details, spot, contract_size, include_fees)
+                total_fee = apply_trading_fees(leg_details, spot, contract_size,
+                                               include_fees, fee_mode)
 
                 prices, pnl_ex_fee, net_premium = compute_payoff(calc_legs, spot, contract_size)
                 # Fees are paid up front, so they shift the whole payoff curve down.
@@ -730,9 +792,10 @@ def api_compute():
         log_event(f"Computed {total_combos} combinations across {len(strategy_ids)} strategies","ok")
         return jsonify({"spot":round(spot,2),"asset":asset,"expiry":expiry,
             "expiry_display":expiry_display,"contract_size":contract_size,
-            "include_fees":include_fees,"use_mark_prices":use_mark_prices,
+            "include_fees":include_fees,"use_mark_prices":use_mark_prices,"fee_mode":fee_mode,
             "fee_model":{"option_base":OPTION_TAKER_BASE_FEE,
                          "option_notional_rate":OPTION_TAKER_NOTIONAL_RATE,
+                         "option_maker_rate":OPTION_MAKER_NOTIONAL_RATE,
                          "option_premium_cap":OPTION_PREMIUM_FEE_CAP,
                          "spot_rate":SPOT_TAKER_FEE_RATE},
             "strategies":results})

@@ -322,6 +322,95 @@ def section_c():
           f"market {mkt['strategies'][0]['net_premium']} vs mark {marked['strategies'][0]['net_premium']}")
 
 
+# ══════════════════════════════════════════════════════════════════════════
+#  D — RFQ multi-leg fee discounts
+#      legs group into long/short calls/puts; the most expensive group pays in
+#      full, then cheapest 100% off, 2nd and 3rd cheapest 50% off
+# ══════════════════════════════════════════════════════════════════════════
+def section_d():
+    section("D — RFQ multi-leg fee discounts")
+
+    size = 0.001
+
+    def fees(strategy, mode):
+        status, data = post("/api/compute", {
+            "asset": "BTC", "expiry": EXPIRY, "strategies": [strategy],
+            "contract_size": size, "fee_mode": mode})
+        return status, data
+
+    status, bad = post("/api/compute", {
+        "asset": "BTC", "expiry": EXPIRY, "strategies": ["long_call"],
+        "contract_size": size, "fee_mode": "nonsense"})
+    check("an unknown fee_mode is rejected", status == 400, str(bad)[:60])
+
+    status, taker = fees("long_call", "taker")
+    status, rfq = fees("long_call", "rfq")
+    t, r = taker["strategies"][0], rfq["strategies"][0]
+    check("single-leg RFQ still pays one base fee (no group to discount)",
+          abs(t["total_fee"] - r["total_fee"]) < 0.02,
+          f"taker {t['total_fee']} vs rfq {r['total_fee']}")
+
+    # 2-leg spread: both legs are in different groups -> cheaper leg is free
+    status, taker = fees("bull_call_spread", "taker")
+    status, rfq = fees("bull_call_spread", "rfq")
+    t, r = taker["strategies"][0], rfq["strategies"][0]
+    free_legs = [l for l in r["legs_detail"] if l["fee_discount"] == 1.0]
+    check("vertical spread: exactly one leg gets a 100% RFQ discount",
+          len(free_legs) == 1, f"discounts={[l['fee_discount'] for l in r['legs_detail']]}")
+    check("vertical spread: RFQ pays one base fee instead of two",
+          r["total_fee"] < t["total_fee"] - 0.4,
+          f"taker {t['total_fee']} vs rfq {r['total_fee']}")
+
+    status, rfq = fees("straddle", "rfq")
+    r = rfq["strategies"][0]
+    check("straddle: long call and long put are different groups, cheaper is free",
+          sum(1 for l in r["legs_detail"] if l["fee_discount"] == 1.0) == 1,
+          f"discounts={[l['fee_discount'] for l in r['legs_detail']]}")
+
+    # iron condor: 4 legs in 4 groups -> 100%, 50%, 50%, full
+    status, rfq = fees("iron_condor", "rfq")
+    r = rfq["strategies"][0]
+    discounts = sorted(l["fee_discount"] for l in r["legs_detail"])
+    check("iron condor: discounts are 0 / 50% / 50% / 100% across the four groups",
+          discounts == [0.0, 0.5, 0.5, 1.0], f"{discounts}")
+
+    status, taker = fees("iron_condor", "taker")
+    check("iron condor RFQ is materially cheaper than four taker orders",
+          r["total_fee"] < taker["strategies"][0]["total_fee"],
+          f"taker {taker['strategies'][0]['total_fee']} vs rfq {r['total_fee']}")
+
+    check("leg fees still sum exactly to total_fee in RFQ mode",
+          abs(sum(l["fee"] for l in r["legs_detail"]) - r["total_fee"]) < 1e-9)
+
+    # a strategy holding spot: the spot leg is free and outside the RFQ groups
+    status, rfq = fees("collar", "rfq")
+    r = rfq["strategies"][0]
+    under = [l for l in r["legs_detail"] if l["opt_type"] == "underlying"][0]
+    check("collar: the underlying leg stays free and ungrouped",
+          under["fee"] == 0 and under["fee_discount"] == 0.0)
+
+    check("response echoes the fee mode", rfq.get("fee_mode") == "rfq")
+
+    # ── maker mode: no base fee, 0.01% notional rate ────────────────────
+    status, maker = fees("long_call", "maker")
+    status, taker = fees("long_call", "taker")
+    mk, tk = maker["strategies"][0], taker["strategies"][0]
+    spot, prem = maker["spot"], mk["legs_detail"][0]["premium"]
+    want = round(min(0.0001 * spot * size, 0.125 * prem * size), 2)
+    check("maker fee = min(0.01% notional, 12.5% premium) with NO base fee",
+          abs(mk["total_fee"] - want) < 0.005, f"got {mk['total_fee']} expected {want}")
+    check("maker is cheaper than taker", mk["total_fee"] < tk["total_fee"],
+          f"maker {mk['total_fee']} vs taker {tk['total_fee']}")
+    check("fee model exposes the maker rate",
+          maker.get("fee_model", {}).get("option_maker_rate") == 0.0001)
+
+    status, mk_ic = fees("iron_condor", "maker")
+    check("maker mode applies no RFQ discounts",
+          all(l["fee_discount"] == 0 for l in mk_ic["strategies"][0]["legs_detail"]))
+    check("maker capital still includes the (smaller) fee once",
+          mk_ic["strategies"][0]["total_cost"] > 0)
+
+
 def main():
     global EXPIRY
     try:
@@ -335,6 +424,7 @@ def main():
     section_a()
     section_b()
     section_c()
+    section_d()
 
     passed = sum(1 for _, ok, _ in _results if ok)
     failed = len(_results) - passed

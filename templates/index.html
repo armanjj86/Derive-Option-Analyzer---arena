@@ -997,6 +997,17 @@ body.zen-mode .zen-floating-bar {
         </div>
         <div class="setting-hint">Derive option taker fee: $0.50 flat base per order + min(0.03% × notional, 12.5% × premium). Spot legs are free.</div>
       </div>
+      <div class="setting-item" style="margin-top:16px">
+        <div class="setting-label-row">
+          <span class="setting-label">Execution / Fee Model</span>
+        </div>
+        <select id="set-feemode" class="setting-input-num" style="width:100%;padding:8px 10px">
+          <option value="taker">Taker — aggressive orderbook order (one base fee per leg)</option>
+          <option value="maker">Maker — resting limit order (no base fee, 0.01%)</option>
+          <option value="rfq">RFQ — single multi-leg quote (group discounts, one base fee)</option>
+        </select>
+        <div class="setting-hint">RFQ groups legs into long/short calls/puts: the most expensive group pays in full, the cheapest is free and the next two get 50% off.</div>
+      </div>
     </div>
   </div>
   <div class="settings-ftr">
@@ -1105,7 +1116,7 @@ let sortState={col:null,dir:0};
 let CHART_RANGE=null;   // chart zoom for this session only (never persisted)
 const ODO_MAX_ANIMATED_ROWS=20;  // rows beyond this render their numbers as plain text
 const DEFAULT_CS={"BTC":0.001,"ETH":0.01};
-const SETTINGS={refreshInterval:0,fontScale:1,theme:"dark",chartRange:30,blur:12,orbs:true,fontFamily:"mixed",palette:"default",maxLossFilter:10,includeFees:true};
+const SETTINGS={refreshInterval:0,fontScale:1,theme:"dark",chartRange:30,blur:12,orbs:true,fontFamily:"mixed",palette:"default",maxLossFilter:10,includeFees:true,feeMode:"taker"};
 
 /* MINI CHART SVGs — shapes preserved, dual-color via clipPath (unique IDs) */
 const MINI_CHARTS={
@@ -1294,17 +1305,20 @@ function switchTab(tab){
 /* SETTINGS */
 function loadSettings(){try{const s=JSON.parse(localStorage.getItem("d_settings"));if(s)Object.assign(SETTINGS,s);applySettings()}catch(e){applySettings()}}
 function saveSettings(){
-  const oldFees = SETTINGS.includeFees;
+  const oldFees = SETTINGS.includeFees, oldMode = SETTINGS.feeMode;
   SETTINGS.chartRange=parseInt(document.getElementById("set-chartrange").value)||30;
   SETTINGS.blur=parseInt(document.getElementById("set-blur").value)||0;
   SETTINGS.refreshInterval=parseInt(document.getElementById("set-refresh").value)||0;
   SETTINGS.fontScale=parseFloat(document.getElementById("set-fontsize").value)||1;
   SETTINGS.maxLossFilter=parseFloat(document.getElementById("set-maxloss").value)||0;
   SETTINGS.includeFees = document.getElementById("set-fees") ? document.getElementById("set-fees").checked : true;
+  const fm = document.getElementById("set-feemode");
+  SETTINGS.feeMode = fm && ["taker","maker","rfq"].includes(fm.value) ? fm.value : "taker";
   localStorage.setItem("d_settings",JSON.stringify(SETTINGS));applySettings();toggleSettings();
   if(autoTimer){clearInterval(autoTimer);autoTimer=null}
   if(SETTINGS.refreshInterval>0)startAutoRefresh();
-  if(oldFees !== SETTINGS.includeFees && DATA && document.getElementById("f-expiry")?.value) {
+  if((oldFees !== SETTINGS.includeFees || oldMode !== SETTINGS.feeMode)
+      && DATA && document.getElementById("f-expiry")?.value) {
     compute();
   }
 }
@@ -1324,6 +1338,8 @@ function applySettings(){
   if(fMl&&!fMl.dataset.userSet){fMl.value=SETTINGS.maxLossFilter!==undefined?SETTINGS.maxLossFilter:10;}
   const sFees=document.getElementById("set-fees");
   if(sFees){sFees.checked=SETTINGS.includeFees!==undefined?SETTINGS.includeFees:true;}
+  const sMode=document.getElementById("set-feemode");
+  if(sMode){sMode.value=SETTINGS.feeMode||"taker";}
   document.getElementById("set-blur").value=SETTINGS.blur;
   document.getElementById("blur-val").textContent=SETTINGS.blur+"px";
   document.getElementById("set-fontsize").value=SETTINGS.fontScale;
@@ -1851,7 +1867,7 @@ async function compute(){
   try{
     const [r] = await Promise.all([
       (await fetch("/api/compute",{method:"POST",headers:{"Content-Type":"application/json"},
-        body:JSON.stringify({asset,expiry,strategies:ids,contract_size:cs,include_fees:SETTINGS.includeFees!==undefined?SETTINGS.includeFees:true})})).json(),
+        body:JSON.stringify({asset,expiry,strategies:ids,contract_size:cs,include_fees:SETTINGS.includeFees!==undefined?SETTINGS.includeFees:true,fee_mode:SETTINGS.feeMode||"taker"})})).json(),
       loadMarketData(),
       fetchSpot()
     ]);
@@ -1971,12 +1987,16 @@ function rollOdometer(el, targetStr, duration = 700, cacheKey = null) {
   flushText();
 }
 
-/* ═══ DERIVE FEE MODEL (mirror of app.py — https://docs.derive.xyz/reference/fees-1) ═══
-   Option taker: $0.50 FLAT base fee per order + min(0.03% x notional, 12.5% x premium).
-   Only the variable part scales with contract size; spot legs are free.            */
+/* ═══ DERIVE FEE MODEL (mirror of app.py — https://docs.derive.xyz/reference/fees-1)
+   taker : $0.50 flat base PER LEG (each leg is its own order) + min(0.03% notional, 12.5% premium)
+   maker : min(0.01% notional, 12.5% premium), no base fee
+   rfq   : taker rates with multi-leg group discounts + ONE $0.50 base fee
+   Spot legs are always free.                                                     */
 const DEFAULT_FEE_MODEL = { option_base: 0.50, option_notional_rate: 0.0003,
-                            option_premium_cap: 0.125, spot_rate: 0 };
+                            option_maker_rate: 0.0001, option_premium_cap: 0.125, spot_rate: 0 };
+const FEE_MODE_LABELS = { taker: "Taker (orderbook)", maker: "Maker (resting limit)", rfq: "RFQ (multi-leg)" };
 const round2 = v => Math.round((v + Number.EPSILON) * 100) / 100;
+
 /* Values smaller than this are indistinguishable from zero for the traded size —
    mirrors `zero_eps` in app.py (an absolute $0.01 hid real P&L at small sizes). */
 function zeroEps(d) {
@@ -1984,11 +2004,46 @@ function zeroEps(d) {
   return Math.max(1e-6, (data.spot || 0) * (data.contract_size || 0) * 1e-5);
 }
 
-function legTradingFee(leg, spot, cs, model) {
-  const m = model || DEFAULT_FEE_MODEL;
-  if (leg.opt_type === "underlying") return round2(m.spot_rate * spot * cs);
-  return round2(m.option_base + Math.min(m.option_notional_rate * spot * cs,
-                                         m.option_premium_cap * (leg.premium || 0) * cs));
+function computeLegFees(legs, spot, cs, model, mode) {
+  const m = Object.assign({}, DEFAULT_FEE_MODEL, model || {});
+  const rate = mode === "maker" ? m.option_maker_rate : m.option_notional_rate;
+  const raw = legs.map(l => l.opt_type === "underlying"
+    ? m.spot_rate * spot * cs
+    : Math.min(rate * spot * cs, m.option_premium_cap * (l.premium || 0) * cs));
+
+  // RFQ groups: long/short x calls/puts
+  const groups = {};
+  legs.forEach((l, i) => {
+    if (l.opt_type !== "underlying") groups[i] = (l.direction === "Buy" ? "long" : "short") + "_" + l.opt_type + "s";
+  });
+
+  const mult = {};
+  if (mode === "rfq") {
+    const totals = {};
+    Object.entries(groups).forEach(([i, g]) => { totals[g] = (totals[g] || 0) + raw[i]; });
+    const names = Object.keys(totals);
+    if (names.length > 1) {
+      // most expensive group pays full; then cheapest 100% off, 2nd/3rd 50% off
+      const ranked = names.sort((a, b) => totals[a] - totals[b]).slice(0, -1);
+      const disc = {};
+      ranked.forEach((g, rank) => { disc[g] = rank === 0 ? 0 : (rank <= 2 ? 0.5 : 1); });
+      Object.entries(groups).forEach(([i, g]) => { mult[i] = disc[g] !== undefined ? disc[g] : 1; });
+    }
+  }
+
+  let baseTarget = null;
+  const optionIdx = Object.keys(groups).map(Number);
+  if (mode === "rfq" && optionIdx.length) {
+    baseTarget = optionIdx.reduce((best, i) =>
+      raw[i] * (mult[i] ?? 1) > raw[best] * (mult[best] ?? 1) ? i : best, optionIdx[0]);
+  }
+
+  return legs.map((l, i) => {
+    let fee = raw[i] * (mult[i] ?? 1);
+    if (mode === "taker" && l.opt_type !== "underlying") fee += m.option_base;
+    if (i === baseTarget) fee += m.option_base;
+    return { fee: round2(fee), discount: i in groups ? round2(1 - (mult[i] ?? 1)) : 0 };
+  });
 }
 
 /* Recompute breakevens, distances and return percentages from the (fee-adjusted)
@@ -2032,10 +2087,10 @@ function recomputeContractSize(newCS) {
     const oldFee = s.total_fee || 0;
     let newFee = 0;
     if (s.legs_detail) {
-      s.legs_detail.forEach(l => {
-        l.fee = feesOn ? legTradingFee(l, spot, newCS, model) : 0;
-        newFee += l.fee;
-      });
+      const computed = feesOn
+        ? computeLegFees(s.legs_detail, spot, newCS, model, DATA.fee_mode || "taker")
+        : s.legs_detail.map(() => ({ fee: 0, discount: 0 }));
+      s.legs_detail.forEach((l, i) => { l.fee = computed[i].fee; l.fee_discount = computed[i].discount; newFee += l.fee; });
     }
     newFee = round2(newFee);
 
