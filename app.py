@@ -551,6 +551,95 @@ def index(): return render_template("index.html")
 def api_strategies(): return jsonify(get_all_strategies())
 
 
+MARGIN_TYPES = ("SM", "PM2")
+
+
+@app.route("/api/margin", methods=["POST"])
+def api_margin():
+    """Real exchange margin for one strategy via Derive's public simulator.
+
+    https://docs.derive.xyz/api-reference/subaccounts/publicget_margin
+    Option legs are sent as simulated positions (negative amount = short) and a
+    held underlying as simulated collateral. The response is NET margin — mark to
+    market minus the requirement — so the collateral a trader must post is
+    max(0, -net_initial_margin).
+
+    Deliberately one call per request (triggered from the chart modal) instead of
+    one per combination: analysing 30 combos would otherwise fire 30 upstream
+    requests and blow through Derive's 5 requests/second read limit.
+    """
+    try:
+        body = request.json or {}
+        asset = str(body.get("asset", "BTC")).upper()
+        legs = body.get("legs") or []
+        margin_type = str(body.get("margin_type", "SM")).upper()
+        if margin_type not in MARGIN_TYPES:
+            return jsonify({"error": f"margin_type must be one of {', '.join(MARGIN_TYPES)}"}), 400
+        try:
+            contract_size = float(body.get("contract_size", 1))
+        except (TypeError, ValueError):
+            return jsonify({"error": "Contract size must be a number"}), 400
+        if not (contract_size > 0):
+            return jsonify({"error": "Contract size must be greater than zero"}), 400
+        if not legs:
+            return jsonify({"error": "No legs supplied"}), 400
+
+        positions, collaterals = [], []
+        for leg in legs:
+            direction = 1 if str(leg.get("direction", "Buy")).lower() in ("buy", "long") else -1
+            if leg.get("opt_type") == "underlying":
+                collaterals.append({"asset_name": asset,
+                                    "amount": str(direction * contract_size)})
+                continue
+            name = leg.get("name") or leg.get("instrument_name")
+            if not name:
+                return jsonify({"error": "Leg is missing an instrument name"}), 400
+            positions.append({"instrument_name": name,
+                              "amount": str(direction * contract_size)})
+        if not positions:
+            return jsonify({"error": "No option legs to margin"}), 400
+
+        payload = {"margin_type": margin_type,
+                   "simulated_collaterals": collaterals,
+                   "simulated_positions": positions}
+        if margin_type == "PM2":
+            payload["market"] = asset
+
+        resp = http_requests.post(f"{BASE_URL}/public/get_margin",
+                                  headers={"accept": "application/json",
+                                           "content-type": "application/json"},
+                                  json=payload, timeout=15)
+        if resp.status_code != 200:
+            log_event(f"get_margin upstream {resp.status_code}", "warn")
+            return jsonify({"error": f"Exchange margin service returned {resp.status_code}"}), 502
+        result = (resp.json() or {}).get("result") or {}
+        if not result:
+            return jsonify({"error": "Exchange margin service returned no result"}), 502
+
+        def num(key):
+            try:
+                return float(result.get(key) or 0)
+            except (TypeError, ValueError):
+                return 0.0
+
+        initial = num("pre_initial_margin")
+        maintenance = num("pre_maintenance_margin")
+        return jsonify({
+            "asset": asset, "margin_type": margin_type,
+            "contract_size": contract_size,
+            "net_initial_margin": round(initial, 2),
+            "net_maintenance_margin": round(maintenance, 2),
+            "required_collateral": round(max(0.0, -initial), 2),
+            "maintenance_collateral": round(max(0.0, -maintenance), 2),
+            "legs": len(positions), "collaterals": len(collaterals),
+        })
+    except http_requests.RequestException as e:
+        return jsonify({"error": f"Could not reach the exchange margin service: {e}"}), 502
+    except Exception as e:
+        log_event(f"/api/margin failed: {e}", "error")
+        return jsonify({"error": str(e)}), 500
+
+
 @app.route("/api/health")
 def api_health():
     try:

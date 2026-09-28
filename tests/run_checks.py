@@ -411,6 +411,51 @@ def section_d():
           mk_ic["strategies"][0]["total_cost"] > 0)
 
 
+# ══════════════════════════════════════════════════════════════════════════
+#  E — real exchange margin (public/get_margin)
+# ══════════════════════════════════════════════════════════════════════════
+def section_e():
+    section("E — Exchange margin simulator")
+
+    size = 0.001
+    status, data = compute(["bear_call_spread", "protective_put", "long_call"], contract_size=size)
+    by_id = {}
+    for st in data["strategies"]:
+        by_id.setdefault(st["id"], st)
+
+    def margin(strategy, margin_type="SM"):
+        st = by_id[strategy]
+        return post("/api/margin", {
+            "asset": "BTC", "contract_size": size, "margin_type": margin_type,
+            "legs": [{"name": l["name"], "direction": l["direction"], "opt_type": l["opt_type"]}
+                     for l in st["legs_detail"]]})
+
+    status, m = margin("long_call")
+    check("POST /api/margin answers for a single-leg strategy",
+          status == 200 and "required_collateral" in m, str(m)[:80])
+    check("a long call needs no posted collateral (it is an asset)",
+          m["required_collateral"] == 0, f"required={m['required_collateral']}")
+
+    status, m = margin("bear_call_spread")
+    check("a credit spread reports a real collateral requirement",
+          status == 200 and m["required_collateral"] > 0, f"required={m['required_collateral']}")
+    check("maintenance collateral is returned as well", "maintenance_collateral" in m)
+
+    status, m = margin("protective_put")
+    check("a held underlying is passed as collateral, not a position",
+          status == 200 and m["collaterals"] == 1 and m["legs"] == 1, str(m)[:90])
+
+    status, m = margin("bear_call_spread", "PM2")
+    check("PM2 (portfolio margin) is accepted and echoed",
+          status == 200 and m["margin_type"] == "PM2", str(m)[:70])
+
+    status, bad = post("/api/margin", {"asset": "BTC", "contract_size": size,
+                                       "margin_type": "XX", "legs": [{"name": "x", "direction": "Buy"}]})
+    check("an unknown margin_type is rejected", status == 400, str(bad)[:60])
+    status, bad = post("/api/margin", {"asset": "BTC", "contract_size": 0, "legs": []})
+    check("margin request validates its inputs", status == 400, str(bad)[:60])
+
+
 def main():
     global EXPIRY
     try:
@@ -425,6 +470,7 @@ def main():
     section_b()
     section_c()
     section_d()
+    section_e()
 
     passed = sum(1 for _, ok, _ in _results if ok)
     failed = len(_results) - passed

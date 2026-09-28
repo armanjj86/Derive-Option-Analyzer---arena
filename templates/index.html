@@ -1008,6 +1008,16 @@ body.zen-mode .zen-floating-bar {
         </select>
         <div class="setting-hint">RFQ groups legs into long/short calls/puts: the most expensive group pays in full, the cheapest is free and the next two get 50% off.</div>
       </div>
+      <div class="setting-item" style="margin-top:16px">
+        <div class="setting-label-row">
+          <span class="setting-label">Exchange Margin Type</span>
+        </div>
+        <select id="set-margintype" class="setting-input-num" style="width:100%;padding:8px 10px">
+          <option value="SM">SM — Standard Margin</option>
+          <option value="PM2">PM2 — Portfolio Margin</option>
+        </select>
+        <div class="setting-hint">Used by the “⚖️ Exchange margin” button in the payoff modal, which asks Derive's own margin simulator what the position really requires.</div>
+      </div>
     </div>
   </div>
   <div class="settings-ftr">
@@ -1116,7 +1126,7 @@ let sortState={col:null,dir:0};
 let CHART_RANGE=null;   // chart zoom for this session only (never persisted)
 const ODO_MAX_ANIMATED_ROWS=20;  // rows beyond this render their numbers as plain text
 const DEFAULT_CS={"BTC":0.001,"ETH":0.01};
-const SETTINGS={refreshInterval:0,fontScale:1,theme:"dark",chartRange:30,blur:12,orbs:true,fontFamily:"mixed",palette:"default",maxLossFilter:10,includeFees:true,feeMode:"taker"};
+const SETTINGS={refreshInterval:0,fontScale:1,theme:"dark",chartRange:30,blur:12,orbs:true,fontFamily:"mixed",palette:"default",maxLossFilter:10,includeFees:true,feeMode:"taker",marginType:"SM"};
 
 /* MINI CHART SVGs — shapes preserved, dual-color via clipPath (unique IDs) */
 const MINI_CHARTS={
@@ -1314,6 +1324,8 @@ function saveSettings(){
   SETTINGS.includeFees = document.getElementById("set-fees") ? document.getElementById("set-fees").checked : true;
   const fm = document.getElementById("set-feemode");
   SETTINGS.feeMode = fm && ["taker","maker","rfq"].includes(fm.value) ? fm.value : "taker";
+  const mt = document.getElementById("set-margintype");
+  SETTINGS.marginType = mt && ["SM","PM2"].includes(mt.value) ? mt.value : "SM";
   localStorage.setItem("d_settings",JSON.stringify(SETTINGS));applySettings();toggleSettings();
   if(autoTimer){clearInterval(autoTimer);autoTimer=null}
   if(SETTINGS.refreshInterval>0)startAutoRefresh();
@@ -1340,6 +1352,8 @@ function applySettings(){
   if(sFees){sFees.checked=SETTINGS.includeFees!==undefined?SETTINGS.includeFees:true;}
   const sMode=document.getElementById("set-feemode");
   if(sMode){sMode.value=SETTINGS.feeMode||"taker";}
+  const sMargin=document.getElementById("set-margintype");
+  if(sMargin){sMargin.value=SETTINGS.marginType||"SM";}
   document.getElementById("set-blur").value=SETTINGS.blur;
   document.getElementById("blur-val").textContent=SETTINGS.blur+"px";
   document.getElementById("set-fontsize").value=SETTINGS.fontScale;
@@ -2249,6 +2263,35 @@ function renderStratsGuide(){
 }
 
 /* MODAL */
+/* ═══ REAL EXCHANGE MARGIN (public/get_margin) ═══
+   Our "Capital" figure is an estimate; Derive's own margin engine is usually much
+   lower for defined-risk and credit strategies. Fetched on demand for the open
+   strategy only, so one click = one upstream request (Derive allows 5 reads/s). */
+async function fetchExchangeMargin(){
+  const btn = document.getElementById("btn-margin");
+  const card = document.getElementById("m-capital");
+  if(!CURR_STRAT || !DATA || !card) return;
+  if(btn){ btn.disabled = true; btn.innerHTML = '<span class="spin" style="width:10px;height:10px;border-width:2px;margin:0"></span> …'; }
+  try{
+    const r = await (await fetch("/api/margin",{method:"POST",headers:{"Content-Type":"application/json"},
+      body: JSON.stringify({
+        asset: DATA.asset,
+        contract_size: DATA.contract_size,
+        margin_type: (document.getElementById("set-margintype")?.value || SETTINGS.marginType || "SM"),
+        legs: (CURR_STRAT.legs_detail||[]).map(l=>({name:l.name, direction:l.direction, opt_type:l.opt_type}))
+      })})).json();
+    if(r.error) throw new Error(r.error);
+    const diff = CURR_STRAT.total_cost - r.required_collateral;
+    card.querySelector(".vl-pct").innerHTML =
+      `<span title="Net initial margin $${fmt(r.net_initial_margin)} = mark-to-market minus requirement. Maintenance: $${fmt(r.maintenance_collateral)}">`
+      + `⚖️ ${r.margin_type}: <b style="color:var(--accent-l)">$${fmt(r.required_collateral)}</b>`
+      + (Math.abs(diff) > 0.01 ? ` <span style="color:var(--text-mute)">(${diff>0?"−":"+"}$${fmt(Math.abs(diff))} vs estimate)</span>` : "")
+      + `</span>`;
+  }catch(e){
+    if(btn){ btn.innerHTML = "⚠️ " + String(e.message || "failed").slice(0,40); btn.disabled = false; }
+  }
+}
+
 function openChart(i){
   if(!DATA||!DATA.strategies[i])return;
   const s=DATA.strategies[i];document.getElementById("overlay").classList.add("on");
@@ -2264,7 +2307,7 @@ function openChart(i){
     <div class="m-card ${isNoLoss ? 'profit' : 'loss'}"><div class="lb">Max Loss</div><div class="vl">${mlVL}</div><div class="vl-pct">${mlPct}</div></div>
     <div class="m-card neu"><div class="lb">Spot</div><div class="vl">$${fmt(DATA.spot)}</div></div>
     <div class="m-card ${s.net_premium>=0?'loss':'profit'}"><div class="lb">Premium (${csLabel})</div><div class="vl">${s.net_premium>=0?'-':'+'}$${fmt(Math.abs(s.net_premium))}</div><div class="vl-pct">${s.net_premium>=0?'Debit':'Credit'}</div></div>
-    <div class="m-card neu"><div class="lb">Capital</div><div class="vl">$${fmt(s.total_cost)}</div></div>
+    <div class="m-card neu" id="m-capital"><div class="lb">Capital</div><div class="vl">$${fmt(s.total_cost)}</div><div class="vl-pct" style="display:flex;align-items:center;gap:6px;justify-content:center;flex-wrap:wrap"><span>estimate</span><button class="chart-btn" id="btn-margin" onclick="fetchExchangeMargin()" title="Ask Derive's margin simulator what this position really requires" style="padding:2px 8px;font-size:10px">⚖️ Exchange margin</button></div></div>
     ${s.total_fee > 0 ? `<div class="m-card loss"><div class="lb">Trading Fees</div><div class="vl">-$${fmt(s.total_fee)}</div><div class="vl-pct">Derive Taker/Spot</div></div>` : ""}
     ${s.breakevens.map(be=>`<div class="m-card neu"><div class="lb">Breakeven</div><div class="vl">$${fmt(be)}</div></div>`).join("")}`;
   const ge=document.getElementById("m-greeks");

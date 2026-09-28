@@ -115,6 +115,52 @@ def get_tickers():
     return jsonify({"result": {"tickers": tickers}})
 
 
+@app.post("/public/get_margin")
+def get_margin():
+    """Very small standard-margin approximation — enough to exercise the plumbing.
+
+    net margin = mark-to-market + collateral value - requirement
+      long option : requirement 0 (it is an asset)
+      short option: requirement = 15% of spot per contract, floored at 10%
+      collateral  : valued at spot with a 10% haircut
+    """
+    body = request.json or {}
+    mtm = 0.0
+    requirement = 0.0
+    for pos in body.get("simulated_positions") or []:
+        name = pos["instrument_name"]
+        amount = float(pos["amount"])
+        parts = name.split("-")
+        if len(parts) != 4:
+            continue
+        cur, expiry, strike, kind = parts[0], parts[1], float(parts[2]), parts[3]
+        spot = SPOT.get(cur, 0)
+        try:
+            dte = max((datetime.strptime(expiry, "%Y%m%d").replace(tzinfo=timezone.utc)
+                       - datetime.now(timezone.utc)).days, 1)
+        except ValueError:
+            dte = 1
+        iv = 0.55 + abs(strike - spot) / spot * 0.35
+        price, *_ = black_scholes(spot, strike, dte / 365, iv, kind == "C")
+        mtm += amount * price
+        if amount < 0:
+            requirement += abs(amount) * max(0.15 * spot, 0.10 * spot)
+    collateral = 0.0
+    for col in body.get("simulated_collaterals") or []:
+        collateral += float(col["amount"]) * SPOT.get(col["asset_name"], 1.0) * 0.90
+
+    net_initial = mtm + collateral - requirement
+    net_maintenance = net_initial + requirement * 0.25
+    return jsonify({"result": {
+        "subaccount_id": 0,
+        "is_valid_trade": net_initial >= 0,
+        "pre_initial_margin": f"{net_initial:.4f}",
+        "post_initial_margin": f"{net_initial:.4f}",
+        "pre_maintenance_margin": f"{net_maintenance:.4f}",
+        "post_maintenance_margin": f"{net_maintenance:.4f}",
+    }})
+
+
 @app.post("/<path:unused>")
 def fallback(unused):
     return jsonify({"result": {}})
