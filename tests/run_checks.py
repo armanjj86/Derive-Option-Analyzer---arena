@@ -593,6 +593,78 @@ def section_h():
           f"{len(unprofitable)} unprofitable combos at 0.001 with taker fees")
 
 
+# ══════════════════════════════════════════════════════════════════════════
+#  I — liquidity metrics & filter
+# ══════════════════════════════════════════════════════════════════════════
+def section_i():
+    section("I — Liquidity")
+
+    def run(**extra):
+        payload = {"asset": "BTC", "expiry": EXPIRY, "strategies": ["long_call", "iron_condor"],
+                   "contract_size": 0.01}
+        payload.update(extra)
+        return post("/api/compute", payload)
+
+    status, data = run()
+    strategies = data["strategies"]
+    check("every combination reports liquidity",
+          all("liquidity" in s and s["liquidity"]["rating"] in ("good", "fair", "poor")
+              for s in strategies))
+    check("each option leg carries its own spread / OI / volume",
+          all(l["liquidity"]["spread_pct"] is not None
+              for s in strategies for l in s["legs_detail"] if l["opt_type"] != "underlying"))
+
+    ratings = {s["liquidity"]["rating"] for s in strategies}
+    check("the chain produces a mix of ratings, not one bucket", len(ratings) > 1, f"{ratings}")
+
+    # the rating must follow the worst leg
+    condor = [s for s in strategies if s["id"] == "iron_condor"][0]
+    worst = max(l["liquidity"]["spread_pct"] for l in condor["legs_detail"]
+                if l["opt_type"] != "underlying")
+    check("a structure is rated by its worst leg",
+          abs(condor["liquidity"]["spread_pct"] - worst) < 1e-9,
+          f"reported {condor['liquidity']['spread_pct']}% vs worst leg {worst}%")
+
+    # pick a threshold from the live chain so the check does not depend on how the
+    # mock (or the real book) happens to be quoted today
+    spreads = sorted({l["liquidity"]["spread_pct"] for s in strategies
+                      for l in s["legs_detail"] if l["opt_type"] != "underlying"})
+    limit = round((spreads[0] + spreads[-1]) / 2, 2)
+    status, filtered = run(max_spread_pct=limit)
+    check("max_spread_pct drops the wide-quoted contracts",
+          filtered["liquidity_filter"]["contracts_kept"] < filtered["liquidity_filter"]["contracts_total"],
+          f"limit {limit}% → {filtered['liquidity_filter']['contracts_kept']} of "
+          f"{filtered['liquidity_filter']['contracts_total']} contracts kept "
+          f"(chain spreads {spreads[0]}%..{spreads[-1]}%)")
+    check("every surviving combination respects the spread limit",
+          all(s["liquidity"]["spread_pct"] <= limit + 1e-4 for s in filtered["strategies"]),
+          f"worst {max(s['liquidity']['spread_pct'] for s in filtered['strategies'])}% vs limit {limit}%")
+
+    status, oi_filtered = run(min_open_interest=100)
+    check("min_open_interest drops empty contracts",
+          all(s["liquidity"]["min_open_interest"] >= 100 for s in oi_filtered["strategies"]),
+          f"{len(oi_filtered['strategies'])} combos survive")
+
+    check("filtering leaves the results tradable, not empty",
+          len(filtered["strategies"]) > 0 and len(oi_filtered["strategies"]) > 0)
+
+    status, both = run(max_spread_pct=limit, min_open_interest=100)
+    check("filters combine and are echoed back",
+          both["liquidity_filter"]["max_spread_pct"] == limit
+          and both["liquidity_filter"]["min_open_interest"] == 100)
+
+    status, impossible = run(max_spread_pct=0.0001, min_open_interest=1)
+    check("an impossible filter fails with a clear message",
+          status == 404 and "liquidity" in str(impossible).lower(), str(impossible)[:80])
+
+    status, bad = run(max_spread_pct="wide")
+    check("non-numeric liquidity filters are rejected", status == 400, str(bad)[:60])
+
+    status, off = run()
+    check("with the filter off the whole chain is used",
+          off["liquidity_filter"]["contracts_kept"] == off["liquidity_filter"]["contracts_total"])
+
+
 def main():
     global EXPIRY
     try:
@@ -611,6 +683,7 @@ def main():
     section_f()
     section_g()
     section_h()
+    section_i()
 
     passed = sum(1 for _, ok, _ in _results if ok)
     failed = len(_results) - passed

@@ -130,6 +130,11 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   check("rows rendered", rows.length > 0, `${rows.length} rows`);
   check("long tables scroll inside the card so the header can stick",
     rows.length <= 12 || !!doc.querySelector(".tbl-scroll.tall"));
+  const liqHeader = [...doc.querySelectorAll("#results thead th")].some(th => /Liq/.test(th.textContent));
+  check("results table has a liquidity column", liqHeader);
+  const liqCell = rows[0].querySelector('[data-label="Liquidity"]');
+  check("each row shows a liquidity badge", !!liqCell && /[🟢🟡🔴]|—/.test(liqCell.textContent),
+    liqCell?.textContent.trim());
   const popHeader = [...doc.querySelectorAll("#results thead th")].some(th => /PoP/.test(th.textContent));
   check("results table has a sortable PoP column", popHeader);
   const popCell = rows[0].querySelector('[data-label="PoP"]');
@@ -238,6 +243,8 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
     const want = (spot * cs).toFixed(2);
     return spotRow.textContent.includes(want.replace(/\B(?=(\d{3})+(?!\d))/g, ","));
   })(), `expected ${(w.eval("DATA.spot") * w.eval("DATA.contract_size")).toFixed(2)}`);
+  const ticketHeaders = [...ticket.querySelectorAll("thead th")].map(t => t.textContent.trim());
+  check("the ticket shows liquidity per leg", ticketHeaders.includes("Liquidity"));
   check("a totals row sums the structure",
     /Net/.test(ticket.querySelector("tbody tr:last-child").textContent));
   const text = w.eval("orderTicketText(CURR_STRAT, DATA.contract_size)");

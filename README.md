@@ -204,7 +204,7 @@ Derive-Option-Analyzer/
 | `POST` | `/api/spot` | `{asset}` | قیمت لحظه‌ای از تیکر PERP |
 | `POST` | `/api/expiries` | `{asset}` | سررسیدهای فعال (≥ ۱ روز) |
 | `POST` | `/api/market` | `{asset, expiry?}` | اسپات، تغییر ۲۴h، ATM IV، DVOL، IV Rank |
-| `POST` | `/api/compute` | `{asset, expiry, strategies[], contract_size, include_fees, fee_mode, use_mark_prices}` | تحلیل کامل + دادهٔ نمودار |
+| `POST` | `/api/compute` | `{asset, expiry, strategies[], contract_size, include_fees, fee_mode, use_mark_prices, max_combos, max_spread_pct, min_open_interest}` | تحلیل کامل + دادهٔ نمودار |
 
 <details>
 <summary><b>نمونهٔ درخواست و پاسخ <code>/api/compute</code></b></summary>
@@ -262,6 +262,8 @@ curl -X POST http://localhost:5000/api/compute \
 - انتخاب تک‌استراتژی (رادیویی) با پشتیبانی کیبورد
 - جدول مجازی‌سازی‌شده برای نتایج بزرگ (فقط ردیف‌های دیده‌شده رندر می‌شوند)
 - جدول قابل مرتب‌سازی روی ۶ ستون (شامل **PoP**)
+- **فیلتر نقدشوندگی**: نشان 🟢/🟡/🔴 بر اساس اسپرد Bid/Ask و Open Interest بدترین لگ،
+  به‌همراه فیلتر «حداکثر اسپرد» و «حداقل Open Interest» که **قبل از ساخت ترکیب‌ها** روی زنجیره اعمال می‌شود
 - **احتمال سوددهی (PoP)**: احتمال اینکه پوزیشن در سررسید سودده باشد، از مدل لاگ‌نرمال با IV همان پوزیشن
 - فیلتر زندهٔ «حداکثر زیان ٪» (۰ = غیرفعال)
 - نمودار Payoff با دامنهٔ دقیق ±۱٪ تا ±۱۰۰٪ و حالت «Fit to strikes»

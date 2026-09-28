@@ -117,16 +117,24 @@ def get_tickers():
         for t in ("C", "P"):
             iv = 0.55 + abs(k - spot) / spot * 0.35
             price, delta, gamma, vega, theta = black_scholes(spot, k, T, iv, t == "C")
+            # Liquidity profile: tight and busy near the money, wide and empty in
+            # the wings — so the liquidity filter has something real to bite on.
+            moneyness = abs(k - spot) / spot
+            # round-trip spread ~2% at the money widening to ~24% in the wings,
+            # which is the shape a real BTC option book has
+            half_spread = min(0.01 + moneyness * 0.6, 0.12)
+            open_interest = max(0, int(900 * math.exp(-40 * moneyness * moneyness)) - 5)
+            volume = max(0, int(200 * math.exp(-60 * moneyness * moneyness)))
             tickers[f"{currency}-{expiry}-{int(k)}-{t}"] = {
-                "a": str(round(price * 1.03, 2)), "b": str(round(price * 0.97, 2)),
+                "a": str(round(price * (1 + half_spread), 2)),
+                "b": str(round(price * (1 - half_spread), 2)),
                 "A": "5", "B": "5", "I": str(spot), "M": str(round(price, 2)),
                 "option_pricing": {
                     "d": str(round(delta, 4)), "g": str(round(gamma, 8)),
                     "t": str(round(theta, 4)), "v": str(round(vega, 4)), "r": "0.01",
                     "i": str(round(iv, 4)), "f": str(spot), "m": str(round(price, 2)),
                     "df": "1", "bi": str(round(iv * 0.98, 4)), "ai": str(round(iv * 1.02, 4))},
-                "stats": {"oi": str(random.randint(5, 900)), "v": str(random.randint(0, 200)),
-                          "c": "0", "n": 12},
+                "stats": {"oi": str(open_interest), "v": str(volume), "c": "0", "n": 12},
             }
     return jsonify({"result": {"tickers": tickers}})
 

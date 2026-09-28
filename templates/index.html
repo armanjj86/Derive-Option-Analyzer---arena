@@ -272,6 +272,22 @@
       </div>
       <div class="setting-item" style="margin-top:16px">
         <div class="setting-label-row">
+          <span class="setting-label">Max Bid/Ask Spread</span>
+          <span class="setting-value" id="maxspread-val">off</span>
+        </div>
+        <input type="range" id="set-maxspread" class="setting-slider" min="0" max="40" step="1" value="0"
+               oninput="document.getElementById('maxspread-val').textContent=this.value=='0'?'off':this.value+'%'">
+        <div class="setting-hint">Skip contracts whose bid/ask spread is wider than this — a wide quote means you lose that much the moment you enter. 0 = show everything.</div>
+      </div>
+      <div class="setting-item" style="margin-top:16px">
+        <div class="setting-label-row">
+          <span class="setting-label">Min Open Interest</span>
+        </div>
+        <input type="number" id="set-minoi" class="setting-input-num" value="0" min="0" max="100000" step="10">
+        <div class="setting-hint">Skip contracts nobody holds — with zero open interest there may be no one to close the position with. 0 = show everything.</div>
+      </div>
+      <div class="setting-item" style="margin-top:16px">
+        <div class="setting-label-row">
           <span class="setting-label">Exchange Margin Type</span>
         </div>
         <select id="set-margintype" class="setting-input-num" style="width:100%;padding:8px 10px">

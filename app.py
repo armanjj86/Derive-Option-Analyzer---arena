@@ -385,6 +385,69 @@ def leg_premium(opt, direction, use_mark=False):
     return 0.0, "none"
 
 
+# ═══ LIQUIDITY ═══
+# A combination is only useful if it can actually be traded: a wide bid/ask eats
+# the edge on entry and zero open interest means nobody to trade out with.
+LIQUIDITY_GOOD_SPREAD_PCT = 5.0
+LIQUIDITY_FAIR_SPREAD_PCT = 15.0
+LIQUIDITY_GOOD_OI = 50.0
+LIQUIDITY_FAIR_OI = 5.0
+
+
+def quote_spread_pct(best_bid, best_ask, mark_price=0.0):
+    """Bid/ask spread as a percentage of the mid price (None when not quoted)."""
+    if best_bid > 0 and best_ask > 0 and best_ask >= best_bid:
+        mid = (best_bid + best_ask) / 2.0
+        return (best_ask - best_bid) / mid * 100.0 if mid > 0 else None
+    return None
+
+
+def leg_liquidity(entry):
+    """Tradability metrics for one option contract."""
+    spread = quote_spread_pct(entry.get("best_bid", 0), entry.get("best_ask", 0),
+                              entry.get("mark_price", 0))
+    return {
+        "spread_pct": None if spread is None else round(spread, 2),
+        "open_interest": entry.get("open_interest", 0),
+        "volume": entry.get("volume", 0),
+        "quoted": entry.get("best_bid", 0) > 0 and entry.get("best_ask", 0) > 0,
+    }
+
+
+def liquidity_rating(spread_pct, open_interest, quoted):
+    """good / fair / poor — driven by the worst leg of the structure."""
+    if not quoted or spread_pct is None:
+        return "poor"
+    if spread_pct <= LIQUIDITY_GOOD_SPREAD_PCT and open_interest >= LIQUIDITY_GOOD_OI:
+        return "good"
+    if spread_pct <= LIQUIDITY_FAIR_SPREAD_PCT and open_interest >= LIQUIDITY_FAIR_OI:
+        return "fair"
+    return "poor"
+
+
+def strategy_liquidity(leg_details):
+    """Worst-leg liquidity for a whole structure — a chain is as weak as its links."""
+    spreads, ois, vols, quoted = [], [], [], True
+    for leg in leg_details:
+        if leg["opt_type"] == "underlying":
+            continue
+        liq = leg.get("liquidity") or {}
+        if liq.get("spread_pct") is not None:
+            spreads.append(liq["spread_pct"])
+        ois.append(liq.get("open_interest", 0))
+        vols.append(liq.get("volume", 0))
+        quoted = quoted and bool(liq.get("quoted"))
+    worst_spread = max(spreads) if spreads else None
+    min_oi = min(ois) if ois else 0
+    return {
+        "spread_pct": worst_spread,
+        "min_open_interest": min_oi,
+        "min_volume": min(vols) if vols else 0,
+        "quoted": quoted,
+        "rating": liquidity_rating(worst_spread, min_oi, quoted),
+    }
+
+
 def norm_cdf(x):
     """Standard normal CDF."""
     return 0.5 * (1.0 + math.erf(x / math.sqrt(2.0)))
@@ -855,6 +918,11 @@ def api_compute():
         except (TypeError, ValueError):
             return jsonify({"error":"max_combos must be a whole number"}),400
         max_combos = max(1, min(max_combos, MAX_COMBOS_CEILING))
+        try:
+            max_spread_pct = float(body.get("max_spread_pct") or 0)
+            min_open_interest = float(body.get("min_open_interest") or 0)
+        except (TypeError, ValueError):
+            return jsonify({"error":"Liquidity filters must be numbers"}),400
         fee_mode=str(body.get("fee_mode", "taker")).lower()
         if fee_mode not in FEE_MODES:
             return jsonify({"error":f"fee_mode must be one of {', '.join(FEE_MODES)}"}),400
@@ -897,9 +965,34 @@ def api_compute():
                 "expiry_display":info["expiry_display"],"days_to_expiry":info["days_to_expiry"],
                 "best_ask":best_ask,"best_bid":best_bid,"mark_price":mark_price,
                 "greeks":greeks,"open_interest":float(st.get("oi",0)),"volume":float(st.get("v",0))}
+            entry["liquidity"]=leg_liquidity(entry)
             (calls if info["type"]=="call" else puts).append(entry)
         calls.sort(key=lambda x:x["strike"]); puts.sort(key=lambda x:x["strike"])
         if spot<=0: return jsonify({"error":"Could not determine spot price"}),500
+
+        # ═══ LIQUIDITY FILTER ═══
+        # Applied to the chain *before* combinations are built, so the 30 results
+        # are 30 tradable ones instead of being padded with untradable strikes.
+        chain_total = len(calls) + len(puts)
+
+        def tradable(entry):
+            liq = entry["liquidity"]
+            if min_open_interest > 0 and liq["open_interest"] < min_open_interest:
+                return False
+            if max_spread_pct > 0:
+                if not liq["quoted"] or liq["spread_pct"] is None:
+                    return False
+                if liq["spread_pct"] > max_spread_pct:
+                    return False
+            return True
+
+        if max_spread_pct > 0 or min_open_interest > 0:
+            calls = [c for c in calls if tradable(c)]
+            puts = [p for p in puts if tradable(p)]
+            if not calls and not puts:
+                return jsonify({"error":"No contracts pass the liquidity filter — "
+                                        "relax the max spread or minimum open interest"}),404
+        chain_kept = len(calls) + len(puts)
 
         results=[]; total_combos=0
         for strategy_id in strategy_ids:
@@ -918,7 +1011,9 @@ def api_compute():
                             "strike":spot,"expiry_display":"—","premium":0,"mark_price":0,
                             "best_ask":0,"best_bid":0,
                             "greeks":{"delta":1,"gamma":0,"theta":0,"vega":0,"iv":0},
-                            "open_interest":0,"volume":0,"description":f"Long {asset}","moneyness":"ATM"})
+                            "open_interest":0,"volume":0,
+                            "liquidity":{"spread_pct":0.0,"open_interest":0,"volume":0,"quoted":True},
+                            "description":f"Long {asset}","moneyness":"ATM"})
                         continue
                     opt=combo_copy.pop(0) if combo_copy else None
                     if not opt: break
@@ -933,6 +1028,7 @@ def api_compute():
                         "premium_source":premium_source,
                         "mark_price":opt["mark_price"],"best_ask":opt["best_ask"],"best_bid":opt["best_bid"],
                         "greeks":opt["greeks"],"open_interest":opt["open_interest"],"volume":opt["volume"],
+                        "liquidity":opt.get("liquidity") or leg_liquidity(opt),
                         "description":f"{dir_label} {asset} {s_val} {'Call' if opt['type']=='call' else 'Put'} ({opt['expiry_display']})",
                         "moneyness":mn})
                 if not calc_legs: continue
@@ -1038,6 +1134,7 @@ def api_compute():
                     "max_loss_pct":max_loss_pct,"max_loss_inf":max_loss_inf,
                     "max_profit_price":round(max_profit_price,2),"max_loss_price":round(max_loss_price,2),
                     "breakevens":breakevens,"distance":distance_info,
+                    "liquidity":strategy_liquidity(leg_details),
                     "pop":None if pop is None else round(pop*100,1),
                     "iv_avg":None if iv_avg is None else round(iv_avg,4),
                     "t_years":round(t_years,6),
@@ -1051,6 +1148,9 @@ def api_compute():
             "expiry_display":expiry_display,"contract_size":contract_size,
             "include_fees":include_fees,"use_mark_prices":use_mark_prices,"fee_mode":fee_mode,
             "max_combos":max_combos,
+            "liquidity_filter":{"max_spread_pct":max_spread_pct,
+                                "min_open_interest":min_open_interest,
+                                "contracts_total":chain_total,"contracts_kept":chain_kept},
             "fee_model":{"option_base":OPTION_TAKER_BASE_FEE,
                          "option_notional_rate":OPTION_TAKER_NOTIONAL_RATE,
                          "option_maker_rate":OPTION_MAKER_NOTIONAL_RATE,

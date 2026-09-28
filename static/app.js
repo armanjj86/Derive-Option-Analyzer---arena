@@ -19,7 +19,7 @@ function defaultContractSize(asset){
   if(a && a.default_contract_size) return a.default_contract_size;
   return DEFAULT_CS[asset] || 0.001;
 }
-const SETTINGS={refreshInterval:0,fontScale:1,theme:"dark",chartRange:30,blur:12,orbs:true,fontFamily:"mixed",palette:"default",maxLossFilter:10,includeFees:true,feeMode:"taker",marginType:"SM",maxCombos:30};
+const SETTINGS={refreshInterval:0,fontScale:1,theme:"dark",chartRange:30,blur:12,orbs:true,fontFamily:"mixed",palette:"default",maxLossFilter:10,includeFees:true,feeMode:"taker",marginType:"SM",maxCombos:30,maxSpreadPct:0,minOpenInterest:0};
 
 /* MINI CHART SVGs — shapes preserved, dual-color via clipPath (unique IDs) */
 const MINI_CHARTS={
@@ -238,7 +238,8 @@ function switchTab(tab){
 /* SETTINGS */
 function loadSettings(){try{const s=JSON.parse(localStorage.getItem("d_settings"));if(s)Object.assign(SETTINGS,s);applySettings()}catch(e){applySettings()}}
 function saveSettings(){
-  const oldFees = SETTINGS.includeFees, oldMode = SETTINGS.feeMode, oldCombos = SETTINGS.maxCombos;
+  const oldFees = SETTINGS.includeFees, oldMode = SETTINGS.feeMode, oldCombos = SETTINGS.maxCombos,
+        oldSpread = SETTINGS.maxSpreadPct, oldOi = SETTINGS.minOpenInterest;
   SETTINGS.chartRange=parseInt(document.getElementById("set-chartrange").value)||30;
   SETTINGS.blur=parseInt(document.getElementById("set-blur").value)||0;
   SETTINGS.refreshInterval=parseInt(document.getElementById("set-refresh").value)||0;
@@ -250,10 +251,13 @@ function saveSettings(){
   const mt = document.getElementById("set-margintype");
   SETTINGS.marginType = mt && ["SM","PM2"].includes(mt.value) ? mt.value : "SM";
   SETTINGS.maxCombos = parseInt(document.getElementById("set-maxcombos")?.value) || 30;
+  SETTINGS.maxSpreadPct = parseFloat(document.getElementById("set-maxspread")?.value) || 0;
+  SETTINGS.minOpenInterest = parseFloat(document.getElementById("set-minoi")?.value) || 0;
   localStorage.setItem("d_settings",JSON.stringify(SETTINGS));applySettings();toggleSettings();
   if(autoTimer){clearInterval(autoTimer);autoTimer=null}
   if(SETTINGS.refreshInterval>0)startAutoRefresh();
-  if((oldFees !== SETTINGS.includeFees || oldMode !== SETTINGS.feeMode || oldCombos !== SETTINGS.maxCombos)
+  if((oldFees !== SETTINGS.includeFees || oldMode !== SETTINGS.feeMode || oldCombos !== SETTINGS.maxCombos
+      || oldSpread !== SETTINGS.maxSpreadPct || oldOi !== SETTINGS.minOpenInterest)
       && DATA && document.getElementById("f-expiry")?.value) {
     compute();
   }
@@ -280,6 +284,10 @@ function applySettings(){
   if(sMargin){sMargin.value=SETTINGS.marginType||"SM";}
   const sCombos=document.getElementById("set-maxcombos");
   if(sCombos){sCombos.value=SETTINGS.maxCombos||30;document.getElementById("maxcombos-val").textContent=sCombos.value;}
+  const sSpread=document.getElementById("set-maxspread");
+  if(sSpread){sSpread.value=SETTINGS.maxSpreadPct||0;document.getElementById("maxspread-val").textContent=(SETTINGS.maxSpreadPct||0)==0?"off":SETTINGS.maxSpreadPct+"%";}
+  const sOi=document.getElementById("set-minoi");
+  if(sOi){sOi.value=SETTINGS.minOpenInterest||0;}
   document.getElementById("set-blur").value=SETTINGS.blur;
   document.getElementById("blur-val").textContent=SETTINGS.blur+"px";
   document.getElementById("set-fontsize").value=SETTINGS.fontScale;
@@ -762,6 +770,7 @@ function getShimmerSkeletonHtml(count = 5) {
         <td data-label="Max Profit"><div class="skeleton-box" style="width:80px;height:18px"></div></td>
         <td data-label="Max Loss"><div class="skeleton-box" style="width:80px;height:18px"></div></td>
         <td data-label="PoP"><div class="skeleton-box" style="width:52px;height:18px"></div></td>
+        <td data-label="Liquidity"><div class="skeleton-box" style="width:52px;height:18px"></div></td>
         <td data-label="Breakeven(s)"><div class="skeleton-box" style="width:90px;height:16px"></div></td>
         <td data-label="Distance to Profit"><div class="skeleton-box" style="width:60px;height:16px"></div></td>
         <td data-label="Payoff Chart"><div class="skeleton-box" style="width:75px;height:30px;border-radius:6px"></div></td>
@@ -783,7 +792,7 @@ function getShimmerSkeletonHtml(count = 5) {
       <thead>
         <tr>
           <th>Strategy</th><th>Contract Details</th><th>Net Premium</th><th>Total Cost</th>
-          <th>Max Profit</th><th>Max Loss</th><th>PoP</th><th>Breakeven(s)</th><th>Distance</th><th></th>
+          <th>Max Profit</th><th>Max Loss</th><th>PoP</th><th>Liq</th><th>Breakeven(s)</th><th>Distance</th><th></th>
         </tr>
       </thead>
       <tbody>
@@ -808,7 +817,8 @@ async function compute(){
   try{
     const [r] = await Promise.all([
       (await fetch("/api/compute",{method:"POST",headers:{"Content-Type":"application/json"},
-        body:JSON.stringify({asset,expiry,strategies:ids,contract_size:cs,include_fees:SETTINGS.includeFees!==undefined?SETTINGS.includeFees:true,fee_mode:SETTINGS.feeMode||"taker",max_combos:SETTINGS.maxCombos||30})})).json(),
+        body:JSON.stringify({asset,expiry,strategies:ids,contract_size:cs,include_fees:SETTINGS.includeFees!==undefined?SETTINGS.includeFees:true,fee_mode:SETTINGS.feeMode||"taker",max_combos:SETTINGS.maxCombos||30,
+          max_spread_pct:SETTINGS.maxSpreadPct||0,min_open_interest:SETTINGS.minOpenInterest||0})})).json(),
       loadMarketData(),
       fetchSpot()
     ]);
@@ -825,7 +835,7 @@ function sortTable(col){
   if(sortState.col===col){sortState.dir=sortState.dir===0?1:sortState.dir===1?-1:0}else{sortState.col=col;sortState.dir=1}
   if(sortState.dir===0){sortState.col=null;render(DATA);return}
   const d=sortState.dir;
-  DATA.strategies.sort((a,b)=>{switch(col){case"strategy":return d*a.name.localeCompare(b.name);case"premium":return d*(a.net_premium-b.net_premium);case"cost":return d*(a.total_cost-b.total_cost);case"maxp":return d*((a.max_profit_inf?1e15:a.max_profit)-(b.max_profit_inf?1e15:b.max_profit));case"maxl":return d*((a.max_loss_inf?-1e15:a.max_loss)-(b.max_loss_inf?-1e15:b.max_loss));case"pop":return d*((a.pop??-1)-(b.pop??-1));default:return 0;}});
+  DATA.strategies.sort((a,b)=>{switch(col){case"strategy":return d*a.name.localeCompare(b.name);case"premium":return d*(a.net_premium-b.net_premium);case"cost":return d*(a.total_cost-b.total_cost);case"maxp":return d*((a.max_profit_inf?1e15:a.max_profit)-(b.max_profit_inf?1e15:b.max_profit));case"maxl":return d*((a.max_loss_inf?-1e15:a.max_loss)-(b.max_loss_inf?-1e15:b.max_loss));case"pop":return d*((a.pop??-1)-(b.pop??-1));case"liq":return d*(((a.liquidity?.spread_pct)??999)-((b.liquidity?.spread_pct)??999));default:return 0;}});
   render(DATA);}
 function sI(c){if(sortState.col!==c)return'<span class="si">↕</span>';return sortState.dir===1?'<span class="si">↑</span>':'<span class="si">↓</span>'}
 function sC(c){return sortState.col===c?"sorted":""}
@@ -987,6 +997,23 @@ function computeLegFees(legs, spot, cs, model, mode) {
   });
 }
 
+/* ═══ LIQUIDITY BADGE ═══
+   A combination is only useful if it can be traded: a wide bid/ask eats the edge
+   on entry and zero open interest means nobody to trade out with. */
+const LIQ_STYLE = {
+  good: { icon: "🟢", label: "Liquid",     bg: "var(--green-bg)", fg: "var(--green)" },
+  fair: { icon: "🟡", label: "Thin",       bg: "var(--amber-bg)", fg: "var(--amber)" },
+  poor: { icon: "🔴", label: "Illiquid",   bg: "var(--red-bg)",   fg: "var(--red)"   },
+};
+function liquidityBadge(liq) {
+  if (!liq) return '<span style="color:var(--text-mute)">—</span>';
+  const st = LIQ_STYLE[liq.rating] || LIQ_STYLE.poor;
+  const spread = liq.spread_pct === null || liq.spread_pct === undefined ? "n/a" : liq.spread_pct.toFixed(1) + "%";
+  const tip = `Worst leg spread ${spread} · min open interest ${fmtInt(liq.min_open_interest || 0)}`
+            + (liq.quoted ? "" : " · not fully quoted");
+  return `<span class="pct-tag" title="${tip}" style="background:${st.bg};color:${st.fg}">${st.icon} ${spread}</span>`;
+}
+
 /* ═══ PROBABILITY OF PROFIT (mirror of app.py) ═══
    Driftless lognormal: ln(S_T/S_0) ~ N(-σ²T/2, σ²T), the same assumption behind
    the Black-Scholes IVs the exchange quotes. */
@@ -1140,6 +1167,7 @@ function render(d){
   <th class="${sC('maxp')}" onclick="sortTable('maxp')">Max Profit ${sI('maxp')}</th>
   <th class="${sC('maxl')}" onclick="sortTable('maxl')">Max Loss ${sI('maxl')}</th>
   <th class="${sC('pop')}" onclick="sortTable('pop')" title="Chance the position expires profitable, from a lognormal model at the position's implied volatility">PoP ${sI('pop')}</th>
+  <th class="${sC('liq')}" onclick="sortTable('liq')" title="Worst-leg bid/ask spread and open interest — how realistically this can be traded">Liq ${sI('liq')}</th>
   <th>Breakeven(s)</th><th>Distance</th><th></th></tr></thead><tbody>`;
   const rowsHtml = [];
   stratsToRender.forEach((s, idx)=>{
@@ -1179,6 +1207,7 @@ function render(d){
     <td data-label="Max Profit">${mpH}</td>
     <td data-label="Max Loss">${mlH}</td>
     <td data-label="PoP">${popH}</td>
+    <td data-label="Liquidity">${liquidityBadge(s.liquidity)}</td>
     <td data-label="Breakeven(s)">${bT}</td>
     <td data-label="Distance to Profit" class="dist-col">${dH}</td>
     <td data-label="Payoff Chart"><button class="chart-btn" onclick="openChart(${origIdx})">📈 P&L</button></td></tr>`);
@@ -1264,7 +1293,7 @@ function paintVirtualWindow() {
   const last = Math.min(v.rows.length, first + v.visible);
   const above = first * v.rowHeight;
   const below = Math.max(0, (v.rows.length - last) * v.rowHeight);
-  const spacer = px => `<tr class="v-spacer" aria-hidden="true"><td colspan="10" style="padding:0;border:none;height:${px}px"></td></tr>`;
+  const spacer = px => `<tr class="v-spacer" aria-hidden="true"><td colspan="11" style="padding:0;border:none;height:${px}px"></td></tr>`;
   v.tbody.innerHTML = (above ? spacer(above) : "")
     + v.rows.slice(first, last).join("")
     + (below ? spacer(below) : "");
@@ -1358,6 +1387,14 @@ function legOrderRows(s, cs, spot, asset) {
   });
 }
 
+function liqRatingFor(leg) {
+  const l = leg.liquidity || {};
+  if (!l.quoted || l.spread_pct === null || l.spread_pct === undefined) return "poor";
+  if (l.spread_pct <= 5 && (l.open_interest || 0) >= 50) return "good";
+  if (l.spread_pct <= 15 && (l.open_interest || 0) >= 5) return "fair";
+  return "poor";
+}
+
 function renderOrderTicket(s, cs) {
   const ge = document.getElementById("m-greeks");
   if (!ge) return;
@@ -1382,7 +1419,7 @@ function renderOrderTicket(s, cs) {
       <th>Action</th><th>Instrument</th><th>Amount</th><th>Unit price</th><th>Book</th>
       <th>Cash</th>${showFees ? "<th>Fee</th>" : ""}
       <th title="Position greeks: per-unit value x amount x direction">Δ pos</th>
-      <th>Γ pos</th><th>Θ /day</th><th>ν /1%</th><th>IV</th>
+      <th>Γ pos</th><th>Θ /day</th><th>ν /1%</th><th>IV</th><th>Liquidity</th>
     </tr></thead><tbody>`;
 
   rows.forEach(r => {
@@ -1407,6 +1444,9 @@ function renderOrderTicket(s, cs) {
       + cell("Θ /day", r.isUnderlying ? "—" : pos(g.theta, 4))
       + cell("ν /1%", r.isUnderlying ? "—" : pos(g.vega, 4))
       + cell("IV", r.isUnderlying || g.iv === undefined ? "—" : (g.iv * 100).toFixed(1) + "%")
+      + cell("Liquidity", r.isUnderlying ? "—" : liquidityBadge(Object.assign(
+          { rating: liqRatingFor(r.leg), min_open_interest: (r.leg.liquidity || {}).open_interest },
+          r.leg.liquidity || {})))
       + "</tr>";
   });
 
@@ -1427,6 +1467,13 @@ function renderOrderTicket(s, cs) {
       negative means money leaves your account. Greeks are position greeks: already multiplied by the
       amount and the direction.
     </div>`;
+  if (s.liquidity && s.liquidity.rating === "poor") {
+    h += `<div style="margin-top:10px;padding:8px 12px;border-radius:8px;background:var(--red-bg);
+           border:1px solid var(--red);color:var(--red);font-size:11px;font-weight:700">
+           ⚠️ Thin market: worst leg spread ${s.liquidity.spread_pct === null ? "not quoted" : s.liquidity.spread_pct.toFixed(1) + "%"},
+           minimum open interest ${fmtInt(s.liquidity.min_open_interest || 0)} — the fills above may not be achievable.
+         </div>`;
+  }
   ge.innerHTML = h;
 }
 
@@ -1488,6 +1535,7 @@ function openChart(i){
     <div class="m-card ${(!s.max_profit_inf && s.max_profit < 0) ? 'loss' : 'profit'}"><div class="lb">Max Profit</div><div class="vl">${mpVL}</div><div class="vl-pct">${mpPct}</div></div>
     <div class="m-card ${isNoLoss ? 'profit' : 'loss'}"><div class="lb">Max Loss</div><div class="vl">${mlVL}</div><div class="vl-pct">${mlPct}</div></div>
     <div class="m-card neu"><div class="lb">Spot</div><div class="vl">$${fmt(DATA.spot)}</div></div>
+    ${s.liquidity ? `<div class="m-card neu"><div class="lb">Liquidity</div><div class="vl" style="font-size:16px">${(LIQ_STYLE[s.liquidity.rating]||LIQ_STYLE.poor).icon} ${(LIQ_STYLE[s.liquidity.rating]||LIQ_STYLE.poor).label}</div><div class="vl-pct">${s.liquidity.spread_pct===null?"not quoted":s.liquidity.spread_pct.toFixed(1)+"% spread"} · OI ${fmtInt(s.liquidity.min_open_interest||0)}</div></div>` : ""}
     ${s.pop !== null && s.pop !== undefined ? `<div class="m-card ${s.pop>=60?'profit':s.pop>=40?'neu':'loss'}"><div class="lb">Prob. of Profit</div><div class="vl">${s.pop.toFixed(1)}%</div><div class="vl-pct">at ${(s.iv_avg*100).toFixed(1)}% IV, ${(s.t_years*365).toFixed(1)}d</div></div>` : ""}
     <div class="m-card ${s.net_premium>=0?'loss':'profit'}"><div class="lb">Premium (${csLabel})</div><div class="vl">${s.net_premium>=0?'-':'+'}$${fmt(Math.abs(s.net_premium))}</div><div class="vl-pct">${s.net_premium>=0?'Debit':'Credit'}</div></div>
     <div class="m-card neu" id="m-capital"><div class="lb">Capital</div><div class="vl">$${fmt(s.total_cost)}</div><div class="vl-pct" style="display:flex;align-items:center;gap:6px;justify-content:center;flex-wrap:wrap"><span>estimate</span><button class="chart-btn" id="btn-margin" onclick="fetchExchangeMargin()" title="Ask Derive's margin simulator what this position really requires" style="padding:2px 8px;font-size:10px">⚖️ Exchange margin</button></div></div>
