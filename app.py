@@ -1,19 +1,46 @@
 """
-Derive.xyz Options Strategy Analyzer — v5
-==========================================
-Fixes: capital calculation, terminal output, dropdowns, tooltips, strategies tab.
+Derive.xyz Options Strategy Analyzer
+====================================
+Flask backend: proxies the public Derive (Lyra) REST API and computes
+expiry payoff, Derive trading fees, breakevens and capital for 12 option
+strategies.
+
+Environment variables
+---------------------
+PORT              web server port                     (default 5000)
+FLASK_DEBUG       "1" to enable the Flask debugger    (default off)
+DERIVE_BASE_URL   upstream API base url               (default https://api.lyra.finance)
 """
 
+import hashlib
 import os
-import sys
 import math
-from datetime import datetime
+import itertools
+import re
+from datetime import datetime, timezone
 from flask import Flask, render_template, jsonify, request
 import requests as http_requests
 
 app = Flask(__name__)
-BASE_URL = "https://api.lyra.finance"
-MAX_COMBOS = 30
+# Pick up template edits without a restart during local development.
+app.config["TEMPLATES_AUTO_RELOAD"] = os.environ.get("FLASK_DEBUG", "0").strip().lower() in ("1", "true", "yes", "on") or os.environ.get("TEMPLATES_AUTO_RELOAD", "0") == "1"
+BASE_URL = os.environ.get("DERIVE_BASE_URL", "https://api.lyra.finance").rstrip("/")
+MAX_COMBOS = int(os.environ.get("MAX_COMBOS", 30))      # default combinations per strategy
+MAX_COMBOS_CEILING = 500                                 # hard upper bound per request
+MAX_COMPARE_EXPIRIES = 4                                 # expiries side by side
+# Derive options settle at 08:00 UTC on their expiry date.
+EXPIRY_HOUR_UTC = 8
+MAX_CONTRACT_SIZE = 1_000_000
+
+# ═══ DERIVE TRADING FEES — https://docs.derive.xyz/reference/fees-1 ═══
+# Option taker: $0.50 flat base fee per order + min(0.03% x notional, 12.5% x premium)
+# Spot:         no maker and no taker fees
+OPTION_TAKER_BASE_FEE = 0.50
+OPTION_TAKER_NOTIONAL_RATE = 0.0003
+OPTION_MAKER_NOTIONAL_RATE = 0.0001
+OPTION_PREMIUM_FEE_CAP = 0.125
+SPOT_TAKER_FEE_RATE = 0.0
+FEE_MODES = ("taker", "maker", "rfq")
 # ═══ CACHE (expires after 5 min) ═══
 _cache = {}
 def cache_get(key, ttl=300):
@@ -47,19 +74,36 @@ class C:
     WHITE  = "\033[38;5;255m"
     GRAY   = "\033[38;5;243m"
 
+BOX_TL, BOX_TR, BOX_BL, BOX_BR = "\u2554", "\u2557", "\u255a", "\u255d"
+BOX_H, BOX_V, ARROW, DIAMOND, TICK = "\u2550", "\u2551", "\u25b8", "\u25c6", "\u2713"
+
+
 def log_startup(port):
-    print(f"""
-{C.PURPLE}{C.BOLD}  ╔═══════════════════════════════════════════════════════╗
-  ║                                                       ║
-  ║   {C.CYAN}◆  Option Strategy Analyzer  v5{C.PURPLE}                   ║
-  ║   {C.DIM}Powered by Derive.xyz{C.PURPLE}                              ║
-  ║                                                       ║
-  ║   {C.GREEN}▸ Server:{C.WHITE}  http://localhost:{port}{C.PURPLE}                 ║
-  ║   {C.GREEN}▸ Status:{C.WHITE}  Running{C.GREEN} ✓{C.PURPLE}                               ║
-  ║   {C.GREEN}▸ API:{C.WHITE}     https://api.lyra.finance{C.PURPLE}           ║
-  ║                                                       ║
-  ╚═══════════════════════════════════════════════════════╝{C.RESET}
-""")
+    """Print the boot banner, padded so the box stays aligned for any URL."""
+    inner = 55  # printable width between the box borders
+
+    def visible_len(text):
+        return len(re.sub(r"\033\[[0-9;]*m", "", text))
+
+    def row(label, value="", value_color=C.WHITE):
+        pad = " " * max(0, inner - 3 - visible_len(label) - visible_len(value))
+        return f"  {C.PURPLE}{BOX_V}{C.GREEN}   {label}{value_color}{value}{C.PURPLE}{pad}{BOX_V}"
+
+    blank = f"  {C.PURPLE}{BOX_V}{' ' * inner}{BOX_V}"
+    lines = [
+        f"  {C.PURPLE}{C.BOLD}{BOX_TL}{BOX_H * inner}{BOX_TR}",
+        blank,
+        row(f"{C.CYAN}{DIAMOND}  Option Strategy Analyzer"),
+        row(f"{C.DIM}Powered by Derive.xyz"),
+        blank,
+        row(f"{ARROW} Server:  ", f"http://localhost:{port}"),
+        row(f"{ARROW} Status:  ", f"Running {TICK}", C.GREEN),
+        row(f"{ARROW} API:     ", BASE_URL),
+        blank,
+        f"  {C.PURPLE}{BOX_BL}{BOX_H * inner}{BOX_BR}{C.RESET}",
+    ]
+    print("\n" + "\n".join(lines) + "\n")
+
 
 def log_request(method, path, status, duration_ms=None):
     status_color = C.GREEN if 200 <= status < 300 else C.RED if status >= 400 else C.AMBER
@@ -77,18 +121,34 @@ def log_event(msg, level="info"):
 #  OPTION PARSING
 # ═══════════════════════════════════════════════════════════════════════════════
 
+def utcnow():
+    """Timezone-aware current UTC time (datetime.utcnow() is deprecated)."""
+    return datetime.now(timezone.utc)
+
+
+def parse_expiry_date(date_str):
+    """'20260130' -> aware datetime at the 08:00 UTC Derive settlement time."""
+    return datetime.strptime(date_str, "%Y%m%d").replace(
+        hour=EXPIRY_HOUR_UTC, tzinfo=timezone.utc)
+
+
+def days_to_expiry(expiry_dt, now=None):
+    """Calendar days left, rounded up — an option settling in 6h is '1d', not '0d'."""
+    delta = (expiry_dt - (now or utcnow())).total_seconds()
+    return max(0, math.ceil(delta / 86400.0))
+
+
 def parse_option_name(name):
     parts = name.split("-")
     if len(parts) != 4: return None
     underlying, date_str, strike_str, opt_code = parts
     try:
-        expiry_dt = datetime.strptime(date_str, "%Y%m%d")
-        days = (expiry_dt - datetime.utcnow()).days
+        expiry_dt = parse_expiry_date(date_str)
         return {"underlying":underlying,"expiry":date_str,
                 "expiry_display":expiry_dt.strftime("%b %d"),
                 "strike":float(strike_str),
                 "type":"call" if opt_code=="C" else "put",
-                "type_code":opt_code,"days_to_expiry":max(days,0)}
+                "type_code":opt_code,"days_to_expiry":days_to_expiry(expiry_dt)}
     except (ValueError,IndexError): return None
 
 
@@ -235,51 +295,348 @@ def fetch_tickers(currency, expiry_date, instrument_type="option"):
     return tickers
 
 
-def generate_combinations(strategy, spot, calls, puts):
-    sid = strategy["id"]; combos = []
-    if sid == "long_call":
-        for opt in calls: combos.append([opt]); len(combos)>=MAX_COMBOS and combos.pop()
-    elif sid == "long_put":
-        for opt in puts: combos.append([opt]); len(combos)>=MAX_COMBOS and combos.pop()
-    elif sid in ("covered_call","protective_put"):
-        for opt in (calls if sid=="covered_call" else puts): combos.append([opt]); len(combos)>=MAX_COMBOS and combos.pop()
-    elif sid in ("bull_call_spread","bear_call_spread"):
-        for i,lo in enumerate(calls):
-            for so in calls[i+1:]:
-                if so["strike"]>lo["strike"]: combos.append([lo,so])
-                if len(combos)>=MAX_COMBOS: break
-            if len(combos)>=MAX_COMBOS: break
-    elif sid in ("bear_put_spread","bull_put_spread"):
-        for i,lo in enumerate(puts):
-            for so in puts[i+1:]:
-                if so["strike"]<lo["strike"]: combos.append([lo,so])
-                if len(combos)>=MAX_COMBOS: break
-            if len(combos)>=MAX_COMBOS: break
+def _combination_candidates(sid, spot, calls, puts):
+    """Yield candidate leg tuples for a strategy, in the order its legs are declared.
+
+    `calls` / `puts` arrive sorted by ascending strike. The order of the yielded
+    options must match the order of `STRATEGIES[...]["legs"]` (underlying legs are
+    skipped by the caller), e.g. both put spreads declare the HIGHER strike leg
+    first, so put-spread candidates are yielded as [higher, lower].
+    """
+    if sid in ("long_call", "covered_call"):
+        for opt in calls:
+            yield [opt]
+
+    elif sid in ("long_put", "protective_put"):
+        for opt in puts:
+            yield [opt]
+
+    elif sid in ("bull_call_spread", "bear_call_spread"):
+        # legs: lower-strike call first, higher-strike call second
+        for i, low in enumerate(calls):
+            for high in calls[i + 1:]:
+                if high["strike"] > low["strike"]:
+                    yield [low, high]
+
+    elif sid in ("bear_put_spread", "bull_put_spread"):
+        # legs: higher-strike put first, lower-strike put second
+        desc = sorted(puts, key=lambda x: -x["strike"])
+        for i, high in enumerate(desc):
+            for low in desc[i + 1:]:
+                if low["strike"] < high["strike"]:
+                    yield [high, low]
+
     elif sid == "collar":
-        op=[p for p in puts if p["strike"]<spot]; oc=[c for c in calls if c["strike"]>spot]
-        for pp in op:
-            for cp in oc: combos.append([pp,cp]); len(combos)>=MAX_COMBOS and combos.pop()
-            if len(combos)>=MAX_COMBOS: break
+        otm_puts = [p for p in puts if p["strike"] < spot]
+        otm_calls = [c for c in calls if c["strike"] > spot]
+        for pp in otm_puts:
+            for cc in otm_calls:
+                yield [pp, cc]
+
     elif sid == "straddle":
-        cm={c["strike"]:c for c in calls}; pm={p["strike"]:p for p in puts}
-        for k in sorted(set(cm)&set(pm)): combos.append([cm[k],pm[k]]); len(combos)>=MAX_COMBOS and combos.pop()
+        call_map = {c["strike"]: c for c in calls}
+        put_map = {p["strike"]: p for p in puts}
+        for k in sorted(set(call_map) & set(put_map)):
+            yield [call_map[k], put_map[k]]
+
     elif sid == "strangle":
-        oc=[c for c in calls if c["strike"]>=spot]; op=sorted([p for p in puts if p["strike"]<=spot],key=lambda x:-x["strike"])
-        for co in oc:
-            for po in op:
-                if co["strike"]!=po["strike"]: combos.append([co,po]); len(combos)>=MAX_COMBOS and combos.pop()
-            if len(combos)>=MAX_COMBOS: break
+        otm_calls = [c for c in calls if c["strike"] >= spot]
+        otm_puts = sorted([p for p in puts if p["strike"] <= spot], key=lambda x: -x["strike"])
+        for co in otm_calls:
+            for po in otm_puts:
+                if co["strike"] != po["strike"]:
+                    yield [co, po]
+
     elif sid == "iron_condor":
-        op=sorted([p for p in puts if p["strike"]<spot],key=lambda x:-x["strike"])
-        oc=[c for c in calls if c["strike"]>spot]
-        for i,sp in enumerate(op):
-            for bp in op[i+1:]:
-                for j,sc in enumerate(oc):
-                    for bc in oc[j+1:]: combos.append([bp,sp,sc,bc]); len(combos)>=MAX_COMBOS and combos.pop()
-                    if len(combos)>=MAX_COMBOS: break
-                if len(combos)>=MAX_COMBOS: break
-            if len(combos)>=MAX_COMBOS: break
-    return combos
+        otm_puts = sorted([p for p in puts if p["strike"] < spot], key=lambda x: -x["strike"])
+        otm_calls = [c for c in calls if c["strike"] > spot]
+        # legs: buy lower put, sell higher put, sell lower call, buy higher call
+        for i, sell_put in enumerate(otm_puts):
+            for buy_put in otm_puts[i + 1:]:
+                for j, sell_call in enumerate(otm_calls):
+                    for buy_call in otm_calls[j + 1:]:
+                        yield [buy_put, sell_put, sell_call, buy_call]
+
+
+def generate_combinations(strategy, spot, calls, puts, limit=None):
+    """Return at most `limit` (default MAX_COMBOS) strike combinations."""
+    return list(itertools.islice(
+        _combination_candidates(strategy["id"], spot, calls, puts), limit or MAX_COMBOS))
+
+
+def leg_premium(opt, direction, use_mark=False):
+    """Executable premium for one leg.
+
+    A buy lifts the offer and a sell hits the bid, so using the mark price for both
+    sides (the previous behaviour) ignored the bid/ask spread and made every spread
+    look cheaper than it trades. Falls back to mark, then to the other side of the
+    book, when a quote is missing.
+    """
+    ask, bid, mark = opt["best_ask"], opt["best_bid"], opt["mark_price"]
+    if use_mark:
+        for price, src in ((mark, "mark"), (ask, "ask"), (bid, "bid")):
+            if price > 0:
+                return price, src
+        return 0.0, "none"
+    order = ((ask, "ask"), (mark, "mark"), (bid, "bid")) if direction > 0 else \
+            ((bid, "bid"), (mark, "mark"), (ask, "ask"))
+    for price, src in order:
+        if price > 0:
+            return price, src
+    return 0.0, "none"
+
+
+# ═══ LIQUIDITY ═══
+# A combination is only useful if it can actually be traded: a wide bid/ask eats
+# the edge on entry and zero open interest means nobody to trade out with.
+LIQUIDITY_GOOD_SPREAD_PCT = 5.0
+LIQUIDITY_FAIR_SPREAD_PCT = 15.0
+LIQUIDITY_GOOD_OI = 50.0
+LIQUIDITY_FAIR_OI = 5.0
+
+
+def quote_spread_pct(best_bid, best_ask, mark_price=0.0):
+    """Bid/ask spread as a percentage of the mid price (None when not quoted)."""
+    if best_bid > 0 and best_ask > 0 and best_ask >= best_bid:
+        mid = (best_bid + best_ask) / 2.0
+        return (best_ask - best_bid) / mid * 100.0 if mid > 0 else None
+    return None
+
+
+def leg_liquidity(entry):
+    """Tradability metrics for one option contract."""
+    spread = quote_spread_pct(entry.get("best_bid", 0), entry.get("best_ask", 0),
+                              entry.get("mark_price", 0))
+    return {
+        "spread_pct": None if spread is None else round(spread, 2),
+        "open_interest": entry.get("open_interest", 0),
+        "volume": entry.get("volume", 0),
+        "quoted": entry.get("best_bid", 0) > 0 and entry.get("best_ask", 0) > 0,
+    }
+
+
+def liquidity_rating(spread_pct, open_interest, quoted):
+    """good / fair / poor — driven by the worst leg of the structure."""
+    if not quoted or spread_pct is None:
+        return "poor"
+    if spread_pct <= LIQUIDITY_GOOD_SPREAD_PCT and open_interest >= LIQUIDITY_GOOD_OI:
+        return "good"
+    if spread_pct <= LIQUIDITY_FAIR_SPREAD_PCT and open_interest >= LIQUIDITY_FAIR_OI:
+        return "fair"
+    return "poor"
+
+
+def strategy_liquidity(leg_details):
+    """Worst-leg liquidity for a whole structure — a chain is as weak as its links."""
+    spreads, ois, vols, quoted = [], [], [], True
+    for leg in leg_details:
+        if leg["opt_type"] == "underlying":
+            continue
+        liq = leg.get("liquidity") or {}
+        if liq.get("spread_pct") is not None:
+            spreads.append(liq["spread_pct"])
+        ois.append(liq.get("open_interest", 0))
+        vols.append(liq.get("volume", 0))
+        quoted = quoted and bool(liq.get("quoted"))
+    worst_spread = max(spreads) if spreads else None
+    min_oi = min(ois) if ois else 0
+    return {
+        "spread_pct": worst_spread,
+        "min_open_interest": min_oi,
+        "min_volume": min(vols) if vols else 0,
+        "quoted": quoted,
+        "rating": liquidity_rating(worst_spread, min_oi, quoted),
+    }
+
+
+def norm_cdf(x):
+    """Standard normal CDF."""
+    return 0.5 * (1.0 + math.erf(x / math.sqrt(2.0)))
+
+
+def lognormal_cdf(price, spot, sigma, t_years):
+    """P(S_T <= price) under a driftless lognormal (risk-neutral, r = 0).
+
+    ln(S_T/S_0) ~ N(-sigma^2 T / 2, sigma^2 T) — the standard assumption behind
+    the Black-Scholes prices the exchange quotes, so probabilities stay
+    consistent with the IVs shown in the ticket.
+    """
+    if price <= 0:
+        return 0.0
+    if math.isinf(price):
+        return 1.0
+    vol = sigma * math.sqrt(t_years)
+    if vol <= 0:
+        return 1.0 if price >= spot else 0.0
+    return norm_cdf((math.log(price / spot) + 0.5 * vol * vol) / vol)
+
+
+def probability_of_profit(legs, spot, contract_size, fee, breakevens, sigma, t_years):
+    """Chance the position expires profitable.
+
+    The payoff is piecewise linear, so the profitable set is the union of the
+    intervals between breakevens where the payoff is positive; each interval's
+    probability comes from the lognormal CDF.
+    """
+    if not sigma or sigma <= 0 or not t_years or t_years <= 0:
+        return None
+    edges = [0.0] + sorted(breakevens) + [math.inf]
+    total = 0.0
+    for lo, hi in zip(edges, edges[1:]):
+        probe = spot * 3 + lo if math.isinf(hi) else (lo + hi) / 2.0
+        if payoff_at(legs, spot, probe, contract_size, fee) > 0:
+            total += lognormal_cdf(hi, spot, sigma, t_years) - lognormal_cdf(lo, spot, sigma, t_years)
+    return max(0.0, min(1.0, total))
+
+
+def position_iv(leg_details):
+    """Vega-weighted average implied vol of the option legs (simple mean fallback)."""
+    ivs, weights = [], []
+    for leg in leg_details:
+        if leg["opt_type"] == "underlying":
+            continue
+        iv = (leg.get("greeks") or {}).get("iv")
+        if iv and iv > 0:
+            ivs.append(iv)
+            weights.append(abs((leg.get("greeks") or {}).get("vega") or 0) or 1.0)
+    if not ivs:
+        return None
+    return sum(i * w for i, w in zip(ivs, weights)) / sum(weights)
+
+
+def payoff_at(legs, spot, price, contract_size=1, fee=0.0):
+    """Net P&L of the position at `price` on expiry day."""
+    total = 0.0
+    for leg in legs:
+        d, ot, k, p = leg["direction"], leg["opt_type"], leg["strike"], leg["premium"]
+        if ot == "underlying":
+            total += d * (price - spot)
+        elif ot == "call":
+            total += d * (max(price - k, 0) - p)
+        else:
+            total += d * (max(k - price, 0) - p)
+    return total * contract_size - fee
+
+
+def payoff_extremes(legs, spot, contract_size=1, fee=0.0):
+    """Exact best/worst case of a piecewise-linear expiry payoff.
+
+    Kinks only occur at strikes, so the extremes are found among {0, strikes, +inf}.
+    The far-upside behaviour is decided by the slope above the highest strike:
+    calls and the underlying contribute +1 per unit, puts contribute 0. Downside is
+    always bounded because the price cannot go below zero — which is why a covered
+    call must NOT be reported as having unlimited loss.
+    """
+    strikes = sorted({l["strike"] for l in legs if l["opt_type"] != "underlying"})
+    slope_up = sum(l["direction"] for l in legs if l["opt_type"] in ("call", "underlying"))
+
+    probe = [0.0] + strikes
+    probe.append((max(strikes) if strikes else spot) * 1.5 + spot * 0.5)
+    values = [(payoff_at(legs, spot, price, contract_size, fee), price) for price in probe]
+
+    max_profit, max_profit_price = max(values, key=lambda v: v[0])
+    max_loss, max_loss_price = min(values, key=lambda v: v[0])
+    return {
+        "max_profit": max_profit, "max_profit_price": max_profit_price,
+        "max_loss": max_loss, "max_loss_price": max_loss_price,
+        "max_profit_inf": slope_up > 0,
+        "max_loss_inf": slope_up < 0,
+    }
+
+
+def option_variable_fee(spot, premium, amount, taker=True):
+    """Variable part of a Derive option fee for one leg.
+
+    https://docs.derive.xyz/reference/fees-1
+        taker: min(0.03% x notional, 12.5% x premium)
+        maker: min(0.01% x notional, 12.5% x premium)
+    with notional = spot x amount and premium = option price x amount.
+    """
+    rate = OPTION_TAKER_NOTIONAL_RATE if taker else OPTION_MAKER_NOTIONAL_RATE
+    return min(rate * spot * amount, OPTION_PREMIUM_FEE_CAP * premium * amount)
+
+
+def spot_taker_fee(spot, amount):
+    """Derive charges no maker/taker fee on spot trades."""
+    return SPOT_TAKER_FEE_RATE * spot * amount
+
+
+def rfq_group(leg):
+    """RFQ fee group of a leg: long calls / long puts / short calls / short puts."""
+    side = "long" if leg["direction"] == "Buy" else "short"
+    return f"{side}_{leg['opt_type']}s"
+
+
+def apply_rfq_discounts(fees_by_leg, groups):
+    """Apply Derive's RFQ multi-leg discount to per-leg variable fees.
+
+    Legs are grouped (long calls / long puts / short calls / short puts / perps),
+    the fee is summed per group and the most expensive group always pays in full.
+    Ranked by group total, the remaining groups get: cheapest 100% off, second and
+    third cheapest 50% off, anything else no discount.
+    """
+    totals = {}
+    for idx, group in groups.items():
+        totals[group] = totals.get(group, 0.0) + fees_by_leg[idx]
+    if len(totals) <= 1:
+        return {idx: 1.0 for idx in groups}
+
+    # cheapest first; the most expensive group is excluded from the discount ladder
+    ranked = sorted(totals, key=lambda g: totals[g])[:-1]
+    discount = {}
+    for rank, group in enumerate(ranked):
+        discount[group] = 0.0 if rank == 0 else (0.5 if rank in (1, 2) else 1.0)
+    return {idx: discount.get(group, 1.0) for idx, group in groups.items()}
+
+
+def apply_trading_fees(leg_details, spot, contract_size, include_fees=True, fee_mode="taker"):
+    """Attach a per-leg `fee` to leg_details and return their exact total.
+
+    fee_mode:
+      taker  each leg is its own aggressive orderbook order:
+             $0.50 base per leg + the variable taker fee
+      maker  resting limit orders: variable maker fee only, no base fee
+      rfq    one multi-leg quote: variable taker fee per leg with the RFQ group
+             discounts, plus a single $0.50 base fee for the whole structure
+             (attributed to the leg that pays the full fee, so the per-leg column
+             still adds up to the total)
+
+    Leg fees are rounded to cents (what actually gets charged) and the total is the
+    sum of those rounded values, so the breakdown always adds up to the total.
+    """
+    if not include_fees:
+        for leg in leg_details:
+            leg["fee"] = 0.0
+        return 0.0
+
+    taker = fee_mode != "maker"
+    raw = {}
+    groups = {}
+    for idx, leg in enumerate(leg_details):
+        if leg["opt_type"] == "underlying":
+            raw[idx] = spot_taker_fee(spot, contract_size)   # spot is free on Derive
+        else:
+            raw[idx] = option_variable_fee(spot, leg["premium"], contract_size, taker)
+            groups[idx] = rfq_group(leg)
+
+    multipliers = apply_rfq_discounts(raw, groups) if fee_mode == "rfq" else {}
+
+    base_target = None
+    if fee_mode == "rfq" and groups:
+        # the single taker base fee rides along with the most expensive leg
+        base_target = max(groups, key=lambda i: raw[i] * multipliers.get(i, 1.0))
+
+    total = 0.0
+    for idx, leg in enumerate(leg_details):
+        fee = raw[idx] * multipliers.get(idx, 1.0)
+        if fee_mode == "taker" and leg["opt_type"] != "underlying":
+            fee += OPTION_TAKER_BASE_FEE          # one order per leg
+        if idx == base_target:
+            fee += OPTION_TAKER_BASE_FEE          # one order for the whole RFQ
+        leg["fee"] = round(fee, 2)
+        leg["fee_discount"] = round(1 - multipliers.get(idx, 1.0), 2) if idx in groups else 0.0
+        total += leg["fee"]
+    return round(total, 2)
 
 
 def compute_payoff(legs, spot, contract_size=1, n_points=250):
@@ -297,7 +654,9 @@ def compute_payoff(legs, spot, contract_size=1, n_points=250):
             if ot=="underlying": total+=d*(price-spot)
             elif ot=="call": total+=d*(max(price-k,0)-p)
             elif ot=="put": total+=d*(max(k-price,0)-p)
-        pnl.append(round(total*contract_size,2))
+        # 4 decimals: the client rescales this curve when the contract size
+        # changes, and 2-decimal rounding lost the sign of small payoffs.
+        pnl.append(round(total*contract_size,4))
     return prices,pnl,net_premium
 
 
@@ -305,12 +664,194 @@ def compute_payoff(legs, spot, contract_size=1, n_points=250):
 #  ROUTES
 # ═══════════════════════════════════════════════════════════════════════════════
 
+def asset_version():
+    """Short hash of the static bundle so browsers pick up new builds immediately."""
+    digest = hashlib.md5()
+    for name in ("app.css", "app.js"):
+        path = os.path.join(app.static_folder or "static", name)
+        try:
+            with open(path, "rb") as fh:
+                digest.update(fh.read())
+        except OSError:
+            digest.update(name.encode())
+    return digest.hexdigest()[:10]
+
+
 @app.route("/")
-def index(): return render_template("index.html")
+def index():
+    # asset_version busts the browser cache whenever app.css/app.js change
+    return render_template("index.html", asset_version=asset_version())
 
 
 @app.route("/api/strategies")
 def api_strategies(): return jsonify(get_all_strategies())
+
+
+def default_contract_size(spot):
+    """A sensible default trade size for any asset: the power of ten whose
+    notional is closest to ~$100, so BTC -> 0.001, ETH -> 0.01, SOL -> 1."""
+    if not spot or spot <= 0:
+        return 1.0
+    exponent = round(math.log10(100.0 / spot))
+    return float(min(max(10 ** exponent, 0.0001), 1000))
+
+
+def fetch_currencies():
+    """All currencies configured on the exchange (cached — it is one call)."""
+    cached = cache_get("all_currencies", ttl=300)
+    if cached is not None:
+        return cached
+    resp = http_requests.post(f"{BASE_URL}/public/get_all_currencies",
+                              headers={"accept": "application/json",
+                                       "content-type": "application/json"},
+                              json={}, timeout=15)
+    resp.raise_for_status()
+    data = resp.json().get("result", []) or []
+    cache_set("all_currencies", data)
+    return data
+
+
+def currency_has_options(entry):
+    """True when the exchange has an option asset registered for this currency.
+
+    v3 exposes an `option` asset entry; older payloads only carry `market_type`,
+    so both shapes are accepted and we never have to probe instruments per asset.
+    """
+    if entry.get("option"):
+        return True
+    market_type = str(entry.get("market_type") or "").upper()
+    return market_type in ("ALL", "SRM_OPTION_ONLY")
+
+
+@app.route("/api/assets", methods=["GET", "POST"])
+def api_assets():
+    """Tradable option underlyings, straight from the exchange.
+
+    One upstream call lists every currency together with its registered assets,
+    so the UI can offer exactly what Derive supports without fetching an option
+    chain per asset — chains are only loaded for the asset the user picks.
+    """
+    try:
+        assets = []
+        for entry in fetch_currencies():
+            currency = str(entry.get("currency", "")).upper()
+            if not currency or not currency_has_options(entry):
+                continue
+            try:
+                spot = float(entry.get("spot_price") or 0)
+            except (TypeError, ValueError):
+                spot = 0.0
+            try:
+                spot_24h = float(entry.get("spot_price_24h") or 0)
+            except (TypeError, ValueError):
+                spot_24h = 0.0
+            assets.append({
+                "currency": currency,
+                "spot": round(spot, 2),
+                "spot_24h": round(spot_24h, 2),
+                "change_24h": round((spot - spot_24h) / spot_24h * 100, 2) if spot_24h else 0.0,
+                "has_perp": bool(entry.get("perp")),
+                "default_contract_size": default_contract_size(spot),
+            })
+        assets.sort(key=lambda a: (-a["spot"], a["currency"]))
+        if not assets:
+            return jsonify({"error": "No option markets available"}), 503
+        log_event(f"Loaded {len(assets)} option underlyings from the exchange")
+        return jsonify({"assets": assets})
+    except http_requests.RequestException as e:
+        return jsonify({"error": f"Could not reach the exchange: {e}"}), 502
+    except Exception as e:
+        log_event(f"/api/assets failed: {e}", "error")
+        return jsonify({"error": str(e)}), 500
+
+
+MARGIN_TYPES = ("SM", "PM2")
+
+
+@app.route("/api/margin", methods=["POST"])
+def api_margin():
+    """Real exchange margin for one strategy via Derive's public simulator.
+
+    https://docs.derive.xyz/api-reference/subaccounts/publicget_margin
+    Option legs are sent as simulated positions (negative amount = short) and a
+    held underlying as simulated collateral. The response is NET margin — mark to
+    market minus the requirement — so the collateral a trader must post is
+    max(0, -net_initial_margin).
+
+    Deliberately one call per request (triggered from the chart modal) instead of
+    one per combination: analysing 30 combos would otherwise fire 30 upstream
+    requests and blow through Derive's 5 requests/second read limit.
+    """
+    try:
+        body = request.json or {}
+        asset = str(body.get("asset", "BTC")).upper()
+        legs = body.get("legs") or []
+        margin_type = str(body.get("margin_type", "SM")).upper()
+        if margin_type not in MARGIN_TYPES:
+            return jsonify({"error": f"margin_type must be one of {', '.join(MARGIN_TYPES)}"}), 400
+        try:
+            contract_size = float(body.get("contract_size", 1))
+        except (TypeError, ValueError):
+            return jsonify({"error": "Contract size must be a number"}), 400
+        if not (contract_size > 0):
+            return jsonify({"error": "Contract size must be greater than zero"}), 400
+        if not legs:
+            return jsonify({"error": "No legs supplied"}), 400
+
+        positions, collaterals = [], []
+        for leg in legs:
+            direction = 1 if str(leg.get("direction", "Buy")).lower() in ("buy", "long") else -1
+            if leg.get("opt_type") == "underlying":
+                collaterals.append({"asset_name": asset,
+                                    "amount": str(direction * contract_size)})
+                continue
+            name = leg.get("name") or leg.get("instrument_name")
+            if not name:
+                return jsonify({"error": "Leg is missing an instrument name"}), 400
+            positions.append({"instrument_name": name,
+                              "amount": str(direction * contract_size)})
+        if not positions:
+            return jsonify({"error": "No option legs to margin"}), 400
+
+        payload = {"margin_type": margin_type,
+                   "simulated_collaterals": collaterals,
+                   "simulated_positions": positions}
+        if margin_type == "PM2":
+            payload["market"] = asset
+
+        resp = http_requests.post(f"{BASE_URL}/public/get_margin",
+                                  headers={"accept": "application/json",
+                                           "content-type": "application/json"},
+                                  json=payload, timeout=15)
+        if resp.status_code != 200:
+            log_event(f"get_margin upstream {resp.status_code}", "warn")
+            return jsonify({"error": f"Exchange margin service returned {resp.status_code}"}), 502
+        result = (resp.json() or {}).get("result") or {}
+        if not result:
+            return jsonify({"error": "Exchange margin service returned no result"}), 502
+
+        def num(key):
+            try:
+                return float(result.get(key) or 0)
+            except (TypeError, ValueError):
+                return 0.0
+
+        initial = num("pre_initial_margin")
+        maintenance = num("pre_maintenance_margin")
+        return jsonify({
+            "asset": asset, "margin_type": margin_type,
+            "contract_size": contract_size,
+            "net_initial_margin": round(initial, 2),
+            "net_maintenance_margin": round(maintenance, 2),
+            "required_collateral": round(max(0.0, -initial), 2),
+            "maintenance_collateral": round(max(0.0, -maintenance), 2),
+            "legs": len(positions), "collaterals": len(collaterals),
+        })
+    except http_requests.RequestException as e:
+        return jsonify({"error": f"Could not reach the exchange margin service: {e}"}), 502
+    except Exception as e:
+        log_event(f"/api/margin failed: {e}", "error")
+        return jsonify({"error": str(e)}), 500
 
 
 @app.route("/api/health")
@@ -351,13 +892,13 @@ def api_expiries():
         if not instruments:
             instruments = fetch_instruments(asset,"option",False)
             cache_set(cache_key, instruments)
-        expiries,seen=[],set(); now = datetime.utcnow()
+        expiries,seen=[],set(); now = utcnow()
         for inst in instruments:
             if not inst.get("is_active", False): continue
             info = parse_option_name(inst.get("instrument_name",""))
             if info and info["underlying"].upper() == asset.upper() and info["expiry"] not in seen:
-                exp_dt = datetime.strptime(info["expiry"],"%Y%m%d"); days = (exp_dt-now).days
-                if days >= 1:
+                exp_dt = parse_expiry_date(info["expiry"]); days = days_to_expiry(exp_dt, now)
+                if exp_dt > now:
                     expiries.append({"date":info["expiry"],"display":exp_dt.strftime("%b %d, %Y")+f" ({days}d)","days":days})
                     seen.add(info["expiry"])
         expiries.sort(key=lambda x:x["date"])
@@ -369,167 +910,304 @@ def api_expiries():
 @app.route("/api/compute", methods=["POST"])
 def api_compute():
     try:
-        body=request.json; asset=body.get("asset","BTC"); expiry=body.get("expiry")
-        strategy_ids=body.get("strategies",[]); contract_size=float(body.get("contract_size",1))
+        body=request.json or {}; asset=body.get("asset","BTC")
+        # One or many expiries: `expiries` powers the comparison view, `expiry`
+        # stays for backwards compatibility.
+        raw_expiries = body.get("expiries") or ([body.get("expiry")] if body.get("expiry") else [])
+        expiries = []
+        for e in raw_expiries:
+            e = str(e or "").strip()
+            if e and e not in expiries:
+                expiries.append(e)
+        if len(expiries) > MAX_COMPARE_EXPIRIES:
+            return jsonify({"error":f"Compare at most {MAX_COMPARE_EXPIRIES} expiries at once"}),400
+        expiry = expiries[0] if expiries else None
+        strategy_ids=body.get("strategies",[])
         include_fees=bool(body.get("include_fees", True))
-        if not expiry: return jsonify({"error":"Select an expiry"}),400
+        use_mark_prices=bool(body.get("use_mark_prices", False))
+        try:
+            max_combos = int(body.get("max_combos") or MAX_COMBOS)
+        except (TypeError, ValueError):
+            return jsonify({"error":"max_combos must be a whole number"}),400
+        max_combos = max(1, min(max_combos, MAX_COMBOS_CEILING))
+        try:
+            max_spread_pct = float(body.get("max_spread_pct") or 0)
+            min_open_interest = float(body.get("min_open_interest") or 0)
+        except (TypeError, ValueError):
+            return jsonify({"error":"Liquidity filters must be numbers"}),400
+        fee_mode=str(body.get("fee_mode", "taker")).lower()
+        if fee_mode not in FEE_MODES:
+            return jsonify({"error":f"fee_mode must be one of {', '.join(FEE_MODES)}"}),400
+        if not expiries: return jsonify({"error":"Select an expiry"}),400
         if not strategy_ids: return jsonify({"error":"Select at least one strategy"}),400
 
-        log_event(f"Computing {len(strategy_ids)} strategies for {asset} {expiry} (size={contract_size})")
-        tickers=fetch_tickers(asset,expiry,"option")
-        if not tickers: return jsonify({"error":f"No options for {asset} expiring {expiry}"}),404
+        # ── Validate contract size (a zero/negative/NaN size silently produced
+        #    inverted or all-zero results before) ──
+        try:
+            contract_size = float(body.get("contract_size", 1))
+        except (TypeError, ValueError):
+            return jsonify({"error":"Contract size must be a number"}),400
+        if math.isnan(contract_size) or math.isinf(contract_size) or contract_size <= 0:
+            return jsonify({"error":"Contract size must be greater than zero"}),400
+        if contract_size > MAX_CONTRACT_SIZE:
+            return jsonify({"error":f"Contract size must be at most {MAX_CONTRACT_SIZE:,.0f}"}),400
 
-        calls,puts=[],[]; spot=0.0; expiry_display=""
-        for t in tickers:
-            info=parse_option_name(t["instrument_name"])
-            if not info or info["underlying"].upper() != asset.upper(): continue
-            if not expiry_display: expiry_display=datetime.strptime(info["expiry"],"%Y%m%d").strftime("%b %d, %Y")
-            best_ask=float(t.get("best_ask_price",0)); best_bid=float(t.get("best_bid_price",0))
-            mark_price=float(t.get("mark_price",0)); idx_price=float(t.get("index_price",0))
-            if idx_price>0: spot=idx_price
-            op=t.get("option_pricing") or {}; st=t.get("stats") or {}
-            greeks={"delta":float(op.get("delta",0)),"gamma":float(op.get("gamma",0)),
-                "theta":float(op.get("theta",0)),"vega":float(op.get("vega",0)),
-                "rho":float(op.get("rho",0)),"iv":float(op.get("iv",0))}
-            entry={"name":t["instrument_name"],"strike":info["strike"],"type":info["type"],
-                "expiry_display":info["expiry_display"],"days_to_expiry":info["days_to_expiry"],
-                "best_ask":best_ask,"best_bid":best_bid,"mark_price":mark_price,
-                "greeks":greeks,"open_interest":float(st.get("oi",0)),"volume":float(st.get("v",0))}
-            (calls if info["type"]=="call" else puts).append(entry)
-        calls.sort(key=lambda x:x["strike"]); puts.sort(key=lambda x:x["strike"])
-        if spot<=0: return jsonify({"error":"Could not determine spot price"}),500
+        def analyse_expiry(expiry):
+            """Build every requested strategy for ONE expiry.
 
-        results=[]; total_combos=0
-        for strategy_id in strategy_ids:
-            strategy=get_strategy_by_id(strategy_id)
-            if not strategy: continue
-            combos=generate_combinations(strategy,spot,calls,puts)
-            strategy_combos=0
-            for combo_opts in combos:
-                combo_copy=list(combo_opts); calc_legs=[]; leg_details=[]
-                has_underlying=False
-                for leg_def in strategy["legs"]:
-                    if leg_def["type"]=="underlying":
-                        has_underlying=True
-                        calc_legs.append({"direction":1,"opt_type":"underlying","strike":spot,"premium":0})
-                        leg_details.append({"name":f"{asset} Spot","direction":"Long","opt_type":"underlying",
-                            "strike":spot,"expiry_display":"—","premium":0,"mark_price":0,
-                            "best_ask":0,"best_bid":0,
-                            "greeks":{"delta":1,"gamma":0,"theta":0,"vega":0,"iv":0},
-                            "open_interest":0,"volume":0,"description":f"Long {asset}","moneyness":"ATM"})
-                        continue
-                    opt=combo_copy.pop(0) if combo_copy else None
-                    if not opt: break
-                    direction=1 if leg_def["dir"] in ("buy","hold") else -1
-                    dir_label="Buy" if direction>0 else "Sell"
-                    premium=opt["mark_price"] if opt["mark_price"]>0 else opt["best_ask"]
-                    mn=moneyness(opt["strike"],spot,opt["type"])
-                    calc_legs.append({"direction":direction,"opt_type":opt["type"],"strike":opt["strike"],"premium":premium})
-                    s_val=int(opt["strike"]) if opt["strike"]==int(opt["strike"]) else opt["strike"]
-                    leg_details.append({"name":opt["name"],"direction":dir_label,"opt_type":opt["type"],
-                        "strike":opt["strike"],"expiry_display":opt["expiry_display"],"premium":premium,
-                        "mark_price":opt["mark_price"],"best_ask":opt["best_ask"],"best_bid":opt["best_bid"],
-                        "greeks":opt["greeks"],"open_interest":opt["open_interest"],"volume":opt["volume"],
-                        "description":f"{dir_label} {asset} {s_val} {'Call' if opt['type']=='call' else 'Put'} ({opt['expiry_display']})",
-                        "moneyness":mn})
-                if not calc_legs: continue
+            Returns (payload, error). Split out so the comparison view can run the
+            same maths across several expiries in a single request instead of
+            making the browser fire one call per expiry.
+            """
+            log_event(f"Computing {len(strategy_ids)} strategies for {asset} {expiry} (size={contract_size})")
+            tickers=fetch_tickers(asset,expiry,"option")
+            if not tickers: return None, (jsonify({"error":f"No options for {asset} expiring {expiry}"}),404)
 
-                total_fee = 0.0
-                for ld in leg_details:
-                    if not include_fees:
-                        ld["fee"] = 0.0
-                        continue
-                    if ld["opt_type"] == "underlying":
-                        # Spot trading fee: 0.15% (15 bps) of underlying spot value
-                        fee = 0.0015 * spot * contract_size
+            # Exact time to expiry (Derive settles at 08:00 UTC) — used by the
+            # probability-of-profit model. Floored at one hour so an expiry that is
+            # minutes away cannot blow up the maths.
+            t_years = max((parse_expiry_date(expiry) - utcnow()).total_seconds(), 3600.0) / (365.0 * 86400.0)
+
+            calls,puts=[],[]; spot=0.0; expiry_display=""
+            for t in tickers:
+                info=parse_option_name(t["instrument_name"])
+                if not info or info["underlying"].upper() != asset.upper(): continue
+                if not expiry_display: expiry_display=parse_expiry_date(info["expiry"]).strftime("%b %d, %Y")
+                best_ask=float(t.get("best_ask_price",0)); best_bid=float(t.get("best_bid_price",0))
+                mark_price=float(t.get("mark_price",0)); idx_price=float(t.get("index_price",0))
+                if idx_price>0: spot=idx_price
+                op=t.get("option_pricing") or {}; st=t.get("stats") or {}
+                greeks={"delta":float(op.get("delta",0)),"gamma":float(op.get("gamma",0)),
+                    "theta":float(op.get("theta",0)),"vega":float(op.get("vega",0)),
+                    "rho":float(op.get("rho",0)),"iv":float(op.get("iv",0))}
+                entry={"name":t["instrument_name"],"strike":info["strike"],"type":info["type"],
+                    "expiry_display":info["expiry_display"],"days_to_expiry":info["days_to_expiry"],
+                    "best_ask":best_ask,"best_bid":best_bid,"mark_price":mark_price,
+                    "greeks":greeks,"open_interest":float(st.get("oi",0)),"volume":float(st.get("v",0))}
+                entry["liquidity"]=leg_liquidity(entry)
+                (calls if info["type"]=="call" else puts).append(entry)
+            calls.sort(key=lambda x:x["strike"]); puts.sort(key=lambda x:x["strike"])
+            if spot<=0: return None, (jsonify({"error":"Could not determine spot price"}),500)
+
+            # ═══ LIQUIDITY FILTER ═══
+            # Applied to the chain *before* combinations are built, so the 30 results
+            # are 30 tradable ones instead of being padded with untradable strikes.
+            chain_total = len(calls) + len(puts)
+
+            def tradable(entry):
+                liq = entry["liquidity"]
+                if min_open_interest > 0 and liq["open_interest"] < min_open_interest:
+                    return False
+                if max_spread_pct > 0:
+                    if not liq["quoted"] or liq["spread_pct"] is None:
+                        return False
+                    if liq["spread_pct"] > max_spread_pct:
+                        return False
+                return True
+
+            if max_spread_pct > 0 or min_open_interest > 0:
+                calls = [c for c in calls if tradable(c)]
+                puts = [p for p in puts if tradable(p)]
+                if not calls and not puts:
+                    return None, (jsonify({"error":"No contracts pass the liquidity filter — "
+                                                   "relax the max spread or minimum open interest"}),404)
+            chain_kept = len(calls) + len(puts)
+
+            results=[]; total_combos=0
+            for strategy_id in strategy_ids:
+                strategy=get_strategy_by_id(strategy_id)
+                if not strategy: continue
+                combos=generate_combinations(strategy,spot,calls,puts,max_combos)
+                strategy_combos=0
+                for combo_opts in combos:
+                    combo_copy=list(combo_opts); calc_legs=[]; leg_details=[]
+                    has_underlying=False
+                    for leg_def in strategy["legs"]:
+                        if leg_def["type"]=="underlying":
+                            has_underlying=True
+                            calc_legs.append({"direction":1,"opt_type":"underlying","strike":spot,"premium":0})
+                            leg_details.append({"name":f"{asset} Spot","direction":"Long","opt_type":"underlying",
+                                "strike":spot,"expiry_display":"—","premium":0,"mark_price":0,
+                                "best_ask":0,"best_bid":0,
+                                "greeks":{"delta":1,"gamma":0,"theta":0,"vega":0,"iv":0},
+                                "open_interest":0,"volume":0,
+                                "liquidity":{"spread_pct":0.0,"open_interest":0,"volume":0,"quoted":True},
+                                "description":f"Long {asset}","moneyness":"ATM"})
+                            continue
+                        opt=combo_copy.pop(0) if combo_copy else None
+                        if not opt: break
+                        direction=1 if leg_def["dir"] in ("buy","hold") else -1
+                        dir_label="Buy" if direction>0 else "Sell"
+                        premium, premium_source = leg_premium(opt, direction, use_mark_prices)
+                        mn=moneyness(opt["strike"],spot,opt["type"])
+                        calc_legs.append({"direction":direction,"opt_type":opt["type"],"strike":opt["strike"],"premium":premium})
+                        s_val=int(opt["strike"]) if opt["strike"]==int(opt["strike"]) else opt["strike"]
+                        leg_details.append({"name":opt["name"],"direction":dir_label,"opt_type":opt["type"],
+                            "strike":opt["strike"],"expiry_display":opt["expiry_display"],"premium":premium,
+                            "premium_source":premium_source,
+                            "mark_price":opt["mark_price"],"best_ask":opt["best_ask"],"best_bid":opt["best_bid"],
+                            "greeks":opt["greeks"],"open_interest":opt["open_interest"],"volume":opt["volume"],
+                            "liquidity":opt.get("liquidity") or leg_liquidity(opt),
+                            "description":f"{dir_label} {asset} {s_val} {'Call' if opt['type']=='call' else 'Put'} ({opt['expiry_display']})",
+                            "moneyness":mn})
+                    if not calc_legs: continue
+
+                    total_fee = apply_trading_fees(leg_details, spot, contract_size,
+                                                   include_fees, fee_mode)
+
+                    prices, pnl_ex_fee, net_premium = compute_payoff(calc_legs, spot, contract_size)
+                    # Fees are paid up front, so they shift the whole payoff curve down.
+                    pnl = [round(p - total_fee, 4) for p in pnl_ex_fee] if total_fee > 0 else pnl_ex_fee
+                    # Collateral is sized on the pre-fee payoff; the fee is added once, below.
+                    max_loss_ex_fee = min(pnl_ex_fee) if pnl_ex_fee else 0.0
+
+                    if not pnl: continue
+
+                    # ═══ EXACT EXTREMES ═══
+                    # The expiry payoff is piecewise linear, so its extremes sit either at
+                    # a strike, at S=0, or out at infinity. Evaluating those points exactly
+                    # replaces the old grid scan + magnitude heuristics, which wrongly called
+                    # a covered call's (bounded) downside "unlimited".
+                    extremes = payoff_extremes(calc_legs, spot, contract_size, total_fee)
+                    max_profit = extremes["max_profit"]
+                    max_loss = extremes["max_loss"]
+                    max_profit_price = extremes["max_profit_price"]
+                    max_loss_price = extremes["max_loss_price"]
+                    max_profit_inf = extremes["max_profit_inf"]
+                    max_loss_inf = extremes["max_loss_inf"]
+
+                    # Values below this are indistinguishable from zero for this trade size
+                    # (an absolute $0.01 cut-off hid real P&L at small contract sizes).
+                    zero_eps = max(1e-6, spot * contract_size * 1e-5)
+                    # Only snap values that are *within* epsilon of zero. A genuinely
+                    # negative max profit (a combo that can never pay off after crossing
+                    # the spread) must stay negative instead of being shown as break-even.
+                    if not max_loss_inf and abs(max_loss) <= zero_eps:
+                        max_loss = 0.0
+                    if not max_profit_inf and abs(max_profit) <= zero_eps:
+                        max_profit = 0.0
+
+                    # ═══ CAPITAL ═══
+                    # Underlying value (for strategies that hold the asset) + net debit
+                    # paid, or the collateral a credit strategy must post. The pre-fee
+                    # max loss is used here so the fee is not counted twice.
+                    underlying_cost = spot * contract_size if has_underlying else 0
+                    collateral = abs(min(max_loss_ex_fee, 0.0))
+                    if extremes["max_loss_inf"]:
+                        collateral = abs(min(min(pnl_ex_fee), 0.0))
+                    if net_premium > 0:      # debit — premium is paid up front
+                        total_cost = underlying_cost + net_premium
+                    elif net_premium < 0:    # credit — post collateral for the worst case
+                        total_cost = underlying_cost + collateral
+                    else:                    # zero premium
+                        total_cost = underlying_cost or collateral or 1
+                    total_cost += total_fee  # fees are cash out of the same account
+
+                    # Percentage: relative to total_cost
+                    if total_cost > 0:
+                        if max_profit_inf: max_profit_pct = None
+                        else:
+                            raw = max_profit / total_cost * 100
+                            max_profit_pct = round(min(raw,999.9),2) if abs(raw)>500 else round(raw,2)
+                        if max_loss_inf: max_loss_pct = None
+                        elif max_loss >= -zero_eps: max_loss_pct = 0.0
+                        else:
+                            raw = max_loss / total_cost * 100
+                            max_loss_pct = round(max(raw,-999.9),2) if abs(raw)>500 else round(raw,2)
                     else:
-                        # Option trading fee: $0.50 base + min(0.03% of nominal spot, 12.5% of option premium)
-                        fee_per_contract = 0.50 + min(0.0003 * spot, 0.125 * ld["premium"])
-                        fee = fee_per_contract * contract_size
-                    ld["fee"] = round(fee, 2)
-                    total_fee += fee
+                        max_profit_pct=None; max_loss_pct=0.0 if max_loss >= -zero_eps else None
 
-                prices,pnl,net_premium=compute_payoff(calc_legs,spot,contract_size)
-                if total_fee > 0:
-                    pnl = [round(p - total_fee, 2) for p in pnl]
+                    # Breakevens
+                    breakevens=[]
+                    for i in range(len(pnl)-1):
+                        if pnl[i]*pnl[i+1]<0:
+                            x0,x1=prices[i],prices[i+1]; y0,y1=pnl[i],pnl[i+1]
+                            if y1!=y0: breakevens.append(round(x0+(0-y0)*(x1-x0)/(y1-y0),2))
+                    distance_info=[]
+                    for be in breakevens:
+                        dist_pct=round((be-spot)/spot*100,2)
+                        if dist_pct>0: distance_info.append({"price":be,"pct":dist_pct,"label":"↑ to profit"})
+                        else: distance_info.append({"price":be,"pct":abs(dist_pct),"label":"↓ to profit"})
 
-                valid_pnl=[p for p in pnl if not math.isinf(p) and not math.isnan(p)]
-                if not valid_pnl: continue
-                max_profit=max(valid_pnl); max_loss=min(valid_pnl)
-                max_profit_price=prices[pnl.index(max_profit)]; max_loss_price=prices[pnl.index(max_loss)]
-                # Unlimited detection
-                test_high=spot*5; test_low=spot*0.01
-                pnl_high=sum((l["direction"]*(max(test_high-l["strike"],0)-l["premium"]) if l["opt_type"]=="call"
-                    else l["direction"]*(max(l["strike"]-test_high,0)-l["premium"]) if l["opt_type"]=="put"
-                    else l["direction"]*(test_high-spot))*contract_size for l in calc_legs) - total_fee
-                pnl_low=sum((l["direction"]*(max(test_low-l["strike"],0)-l["premium"]) if l["opt_type"]=="call"
-                    else l["direction"]*(max(l["strike"]-test_low,0)-l["premium"]) if l["opt_type"]=="put"
-                    else l["direction"]*(test_low-spot))*contract_size for l in calc_legs) - total_fee
-                max_profit_inf = (pnl_high > max_profit * 1.5 and (pnl_high - max_profit) > 1.0) or (pnl_low > max_profit * 1.5 and (pnl_low - max_profit) > 1.0)
-                max_loss_inf = (pnl_high < max_loss * 1.5 and (max_loss - pnl_high) > 1.0) or (pnl_low < max_loss * 1.5 and (max_loss - pnl_low) > 1.0)
-                if max_loss >= -0.01:
-                    max_loss = 0.0
-                    max_loss_inf = False
-                if max_profit <= 0.01 and not max_profit_inf:
-                    max_profit = 0.0
+                    # Net option premium only (the underlying leg is capital, not premium):
+                    # positive = net debit paid, negative = net credit received.
+                    net_premium = sum(l["direction"] * l["premium"] for l in calc_legs
+                                      if l["opt_type"] != "underlying") * contract_size
+                    # ═══ PROBABILITY OF PROFIT ═══
+                    iv_avg = position_iv(leg_details)
+                    pop = probability_of_profit(calc_legs, spot, contract_size, total_fee,
+                                                breakevens, iv_avg, t_years)
 
-                # ═══ CAPITAL CALCULATION FIX ═══
-                # Include underlying cost for strategies that hold the asset
-                underlying_cost = spot * contract_size if has_underlying else 0
-                if net_premium > 0:  # debit
-                    total_cost = underlying_cost + net_premium
-                elif net_premium < 0:  # credit — underlying cost minus credit received
-                    total_cost = underlying_cost + abs(max_loss) if max_loss != 0 else underlying_cost
-                else:  # zero premium
-                    total_cost = underlying_cost if underlying_cost > 0 else (abs(max_loss) if max_loss != 0 else 1)
-                total_cost += total_fee
+                    overall_mn=strategy_moneyness(leg_details,spot)
+                    results.append({"id":strategy["id"],"name":f"{strategy['emoji']} {strategy['name']}",
+                        "description":strategy["description"],"category":strategy["category"],"risk":strategy["risk"],
+                        "moneyness":overall_mn,"legs":[ld["description"] for ld in leg_details],
+                        "legs_detail":leg_details,"contract_size":contract_size,
+                        "net_premium":round(net_premium,2),"total_cost":round(total_cost,2),"total_fee":round(total_fee,2),
+                        # An unbounded extreme has no meaningful number — send null so no
+                        # consumer accidentally treats the probe value as the real maximum.
+                        "max_profit":None if max_profit_inf else round(max_profit,2),
+                        "max_profit_pct":max_profit_pct,
+                        "max_profit_inf":max_profit_inf,
+                        "max_loss":None if max_loss_inf else round(max_loss,2),
+                        "max_loss_pct":max_loss_pct,"max_loss_inf":max_loss_inf,
+                        "max_profit_price":round(max_profit_price,2),"max_loss_price":round(max_loss_price,2),
+                        "breakevens":breakevens,"distance":distance_info,
+                        "liquidity":strategy_liquidity(leg_details),
+                        "pop":None if pop is None else round(pop*100,1),
+                        "iv_avg":None if iv_avg is None else round(iv_avg,4),
+                        "t_years":round(t_years,6),
+                        "pnl_chart":{"prices":[round(p,2) for p in prices],"pnl":pnl,"spot":round(spot,2),"breakevens":breakevens}})
+                    strategy_combos+=1
+                total_combos+=strategy_combos
 
-                # Percentage: relative to total_cost
-                if total_cost > 0:
-                    if max_profit_inf: max_profit_pct = None
-                    else:
-                        raw = max_profit / total_cost * 100
-                        max_profit_pct = round(min(raw,999.9),2) if abs(raw)>500 else round(raw,2)
-                    if max_loss_inf: max_loss_pct = None
-                    elif max_loss >= -0.01: max_loss_pct = 0.0
-                    else:
-                        raw = max_loss / total_cost * 100
-                        max_loss_pct = round(max(raw,-999.9),2) if abs(raw)>500 else round(raw,2)
-                else:
-                    max_profit_pct=None; max_loss_pct=0.0 if max_loss >= -0.01 else None
 
-                # Breakevens
-                breakevens=[]
-                for i in range(len(pnl)-1):
-                    if pnl[i]*pnl[i+1]<0:
-                        x0,x1=prices[i],prices[i+1]; y0,y1=pnl[i],pnl[i+1]
-                        if y1!=y0: breakevens.append(round(x0+(0-y0)*(x1-x0)/(y1-y0),2))
-                distance_info=[]
-                for be in breakevens:
-                    dist_pct=round((be-spot)/spot*100,2)
-                    if dist_pct>0: distance_info.append({"price":be,"pct":dist_pct,"label":"↑ to profit"})
-                    else: distance_info.append({"price":be,"pct":abs(dist_pct),"label":"↓ to profit"})
+            return {"results":results,"spot":spot,"expiry":expiry,
+                    "expiry_display":expiry_display,"total_combos":total_combos,
+                    "chain_total":chain_total,"chain_kept":chain_kept,
+                    "days":days_to_expiry(parse_expiry_date(expiry))}, None
 
-                net_premium=options_only_premium = sum(l["direction"]*l["premium"] for l in calc_legs if l["opt_type"]!="underlying")*contract_size
-                overall_mn=strategy_moneyness(leg_details,spot)
-                results.append({"id":strategy["id"],"name":f"{strategy['emoji']} {strategy['name']}",
-                    "description":strategy["description"],"category":strategy["category"],"risk":strategy["risk"],
-                    "moneyness":overall_mn,"legs":[ld["description"] for ld in leg_details],
-                    "legs_detail":leg_details,"contract_size":contract_size,
-                    "net_premium":round(net_premium,2),"total_cost":round(total_cost,2),"total_fee":round(total_fee,2),
-                    "max_profit":round(max_profit,2),"max_profit_pct":max_profit_pct,
-                    "max_profit_inf":max_profit_inf,"max_loss":round(max_loss,2),
-                    "max_loss_pct":max_loss_pct,"max_loss_inf":max_loss_inf,
-                    "max_profit_price":round(max_profit_price,2),"max_loss_price":round(max_loss_price,2),
-                    "breakevens":breakevens,"distance":distance_info,
-                    "pnl_chart":{"prices":[round(p,2) for p in prices],"pnl":pnl,"spot":round(spot,2),"breakevens":breakevens}})
-                strategy_combos+=1
-            total_combos+=strategy_combos
+        results, spot, expiry_display = [], 0.0, ""
+        chain_total = chain_kept = 0
+        total_combos = 0
+        expiry_meta = []
+        for idx, exp in enumerate(expiries):
+            payload, err = analyse_expiry(exp)
+            if err:
+                return err
+            if not payload["results"]:
+                continue
+            spot = payload["spot"] or spot
+            chain_total += payload["chain_total"]; chain_kept += payload["chain_kept"]
+            total_combos += payload["total_combos"]
+            if not expiry_display:
+                expiry_display = payload["expiry_display"]
+            expiry_meta.append({"date":exp,"display":payload["expiry_display"],
+                                "days":payload["days"],"color_index":idx,
+                                "combos":len(payload["results"])})
+            for r in payload["results"]:
+                r["expiry"] = exp
+                r["expiry_display"] = payload["expiry_display"]
+                r["expiry_days"] = payload["days"]
+                r["expiry_index"] = idx
+                results.append(r)
 
         if not results: return jsonify({"error":"No strategies could be computed."}),404
         log_event(f"Computed {total_combos} combinations across {len(strategy_ids)} strategies","ok")
         return jsonify({"spot":round(spot,2),"asset":asset,"expiry":expiry,
-            "expiry_display":expiry_display,"contract_size":contract_size,"strategies":results})
+            "expiries":expiry_meta,"compare":len(expiry_meta)>1,
+            "expiry_display":expiry_display,"contract_size":contract_size,
+            "include_fees":include_fees,"use_mark_prices":use_mark_prices,"fee_mode":fee_mode,
+            "max_combos":max_combos,
+            "liquidity_filter":{"max_spread_pct":max_spread_pct,
+                                "min_open_interest":min_open_interest,
+                                "contracts_total":chain_total,"contracts_kept":chain_kept},
+            "fee_model":{"option_base":OPTION_TAKER_BASE_FEE,
+                         "option_notional_rate":OPTION_TAKER_NOTIONAL_RATE,
+                         "option_maker_rate":OPTION_MAKER_NOTIONAL_RATE,
+                         "option_premium_cap":OPTION_PREMIUM_FEE_CAP,
+                         "spot_rate":SPOT_TAKER_FEE_RATE},
+            "strategies":results})
     except http_requests.exceptions.ConnectionError: return jsonify({"error":"Cannot connect to Derive API."}),503
     except http_requests.exceptions.Timeout: return jsonify({"error":"API timeout."}),504
     except Exception as e: log_event(f"Error: {str(e)}","err"); return jsonify({"error":f"Error: {str(e)}"}),500
@@ -572,13 +1250,13 @@ def api_market():
             if not instruments:
                 instruments = fetch_instruments(asset, "option", False)
                 cache_set(cache_key, instruments)
-            now = datetime.utcnow()
+            now = utcnow()
             for inst in instruments:
                 parts = inst.get("instrument_name", "").split("-")
                 if len(parts) >= 2:
                     try:
-                        exp_dt = datetime.strptime(parts[1], "%Y%m%d")
-                        if (exp_dt - now).days >= 1:
+                        exp_dt = parse_expiry_date(parts[1])
+                        if exp_dt > now:
                             expiry = parts[1]
                             break
                     except:
@@ -679,6 +1357,10 @@ def api_market():
 
 
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT",5000))
+    port = int(os.environ.get("PORT", 5000))
+    # Debug mode exposes the interactive Werkzeug console — opt-in only.
+    debug = os.environ.get("FLASK_DEBUG", "0").strip().lower() in ("1", "true", "yes", "on")
     log_startup(port)
-    app.run(host="0.0.0.0",port=port,debug=True)
+    if debug:
+        log_event("FLASK_DEBUG is enabled — do not use this on a public host", "warn")
+    app.run(host="0.0.0.0", port=port, debug=debug)

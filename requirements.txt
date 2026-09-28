@@ -1,5 +1,6 @@
+# Runtime
 Flask>=3.0.0
 requests>=2.31.0
-derive_action_signing>=0.1.0
-web3>=6.0.0
+
+# Optional: production WSGI server (gunicorn -w 2 -b 0.0.0.0:5000 app:app)
 gunicorn>=21.2.0
