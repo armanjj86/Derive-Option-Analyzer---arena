@@ -360,6 +360,68 @@ def generate_combinations(strategy, spot, calls, puts):
         _combination_candidates(strategy["id"], spot, calls, puts), MAX_COMBOS))
 
 
+def leg_premium(opt, direction, use_mark=False):
+    """Executable premium for one leg.
+
+    A buy lifts the offer and a sell hits the bid, so using the mark price for both
+    sides (the previous behaviour) ignored the bid/ask spread and made every spread
+    look cheaper than it trades. Falls back to mark, then to the other side of the
+    book, when a quote is missing.
+    """
+    ask, bid, mark = opt["best_ask"], opt["best_bid"], opt["mark_price"]
+    if use_mark:
+        for price, src in ((mark, "mark"), (ask, "ask"), (bid, "bid")):
+            if price > 0:
+                return price, src
+        return 0.0, "none"
+    order = ((ask, "ask"), (mark, "mark"), (bid, "bid")) if direction > 0 else \
+            ((bid, "bid"), (mark, "mark"), (ask, "ask"))
+    for price, src in order:
+        if price > 0:
+            return price, src
+    return 0.0, "none"
+
+
+def payoff_at(legs, spot, price, contract_size=1, fee=0.0):
+    """Net P&L of the position at `price` on expiry day."""
+    total = 0.0
+    for leg in legs:
+        d, ot, k, p = leg["direction"], leg["opt_type"], leg["strike"], leg["premium"]
+        if ot == "underlying":
+            total += d * (price - spot)
+        elif ot == "call":
+            total += d * (max(price - k, 0) - p)
+        else:
+            total += d * (max(k - price, 0) - p)
+    return total * contract_size - fee
+
+
+def payoff_extremes(legs, spot, contract_size=1, fee=0.0):
+    """Exact best/worst case of a piecewise-linear expiry payoff.
+
+    Kinks only occur at strikes, so the extremes are found among {0, strikes, +inf}.
+    The far-upside behaviour is decided by the slope above the highest strike:
+    calls and the underlying contribute +1 per unit, puts contribute 0. Downside is
+    always bounded because the price cannot go below zero — which is why a covered
+    call must NOT be reported as having unlimited loss.
+    """
+    strikes = sorted({l["strike"] for l in legs if l["opt_type"] != "underlying"})
+    slope_up = sum(l["direction"] for l in legs if l["opt_type"] in ("call", "underlying"))
+
+    probe = [0.0] + strikes
+    probe.append((max(strikes) if strikes else spot) * 1.5 + spot * 0.5)
+    values = [(payoff_at(legs, spot, price, contract_size, fee), price) for price in probe]
+
+    max_profit, max_profit_price = max(values, key=lambda v: v[0])
+    max_loss, max_loss_price = min(values, key=lambda v: v[0])
+    return {
+        "max_profit": max_profit, "max_profit_price": max_profit_price,
+        "max_loss": max_loss, "max_loss_price": max_loss_price,
+        "max_profit_inf": slope_up > 0,
+        "max_loss_inf": slope_up < 0,
+    }
+
+
 def option_taker_fee(spot, premium, amount):
     """Derive option taker fee for one leg.
 
@@ -491,6 +553,7 @@ def api_compute():
         body=request.json or {}; asset=body.get("asset","BTC"); expiry=body.get("expiry")
         strategy_ids=body.get("strategies",[])
         include_fees=bool(body.get("include_fees", True))
+        use_mark_prices=bool(body.get("use_mark_prices", False))
         if not expiry: return jsonify({"error":"Select an expiry"}),400
         if not strategy_ids: return jsonify({"error":"Select at least one strategy"}),400
 
@@ -552,12 +615,13 @@ def api_compute():
                     if not opt: break
                     direction=1 if leg_def["dir"] in ("buy","hold") else -1
                     dir_label="Buy" if direction>0 else "Sell"
-                    premium=opt["mark_price"] if opt["mark_price"]>0 else opt["best_ask"]
+                    premium, premium_source = leg_premium(opt, direction, use_mark_prices)
                     mn=moneyness(opt["strike"],spot,opt["type"])
                     calc_legs.append({"direction":direction,"opt_type":opt["type"],"strike":opt["strike"],"premium":premium})
                     s_val=int(opt["strike"]) if opt["strike"]==int(opt["strike"]) else opt["strike"]
                     leg_details.append({"name":opt["name"],"direction":dir_label,"opt_type":opt["type"],
                         "strike":opt["strike"],"expiry_display":opt["expiry_display"],"premium":premium,
+                        "premium_source":premium_source,
                         "mark_price":opt["mark_price"],"best_ask":opt["best_ask"],"best_bid":opt["best_bid"],
                         "greeks":opt["greeks"],"open_interest":opt["open_interest"],"volume":opt["volume"],
                         "description":f"{dir_label} {asset} {s_val} {'Call' if opt['type']=='call' else 'Put'} ({opt['expiry_display']})",
@@ -572,24 +636,30 @@ def api_compute():
                 # Collateral is sized on the pre-fee payoff; the fee is added once, below.
                 max_loss_ex_fee = min(pnl_ex_fee) if pnl_ex_fee else 0.0
 
-                valid_pnl=[p for p in pnl if not math.isinf(p) and not math.isnan(p)]
-                if not valid_pnl: continue
-                max_profit=max(valid_pnl); max_loss=min(valid_pnl)
-                max_profit_price=prices[pnl.index(max_profit)]; max_loss_price=prices[pnl.index(max_loss)]
-                # Unlimited detection
-                test_high=spot*5; test_low=spot*0.01
-                pnl_high=sum((l["direction"]*(max(test_high-l["strike"],0)-l["premium"]) if l["opt_type"]=="call"
-                    else l["direction"]*(max(l["strike"]-test_high,0)-l["premium"]) if l["opt_type"]=="put"
-                    else l["direction"]*(test_high-spot))*contract_size for l in calc_legs) - total_fee
-                pnl_low=sum((l["direction"]*(max(test_low-l["strike"],0)-l["premium"]) if l["opt_type"]=="call"
-                    else l["direction"]*(max(l["strike"]-test_low,0)-l["premium"]) if l["opt_type"]=="put"
-                    else l["direction"]*(test_low-spot))*contract_size for l in calc_legs) - total_fee
-                max_profit_inf = (pnl_high > max_profit * 1.5 and (pnl_high - max_profit) > 1.0) or (pnl_low > max_profit * 1.5 and (pnl_low - max_profit) > 1.0)
-                max_loss_inf = (pnl_high < max_loss * 1.5 and (max_loss - pnl_high) > 1.0) or (pnl_low < max_loss * 1.5 and (max_loss - pnl_low) > 1.0)
-                if max_loss >= -0.01:
+                if not pnl: continue
+
+                # ═══ EXACT EXTREMES ═══
+                # The expiry payoff is piecewise linear, so its extremes sit either at
+                # a strike, at S=0, or out at infinity. Evaluating those points exactly
+                # replaces the old grid scan + magnitude heuristics, which wrongly called
+                # a covered call's (bounded) downside "unlimited".
+                extremes = payoff_extremes(calc_legs, spot, contract_size, total_fee)
+                max_profit = extremes["max_profit"]
+                max_loss = extremes["max_loss"]
+                max_profit_price = extremes["max_profit_price"]
+                max_loss_price = extremes["max_loss_price"]
+                max_profit_inf = extremes["max_profit_inf"]
+                max_loss_inf = extremes["max_loss_inf"]
+
+                # Values below this are indistinguishable from zero for this trade size
+                # (an absolute $0.01 cut-off hid real P&L at small contract sizes).
+                zero_eps = max(1e-6, spot * contract_size * 1e-5)
+                # Only snap values that are *within* epsilon of zero. A genuinely
+                # negative max profit (a combo that can never pay off after crossing
+                # the spread) must stay negative instead of being shown as break-even.
+                if not max_loss_inf and abs(max_loss) <= zero_eps:
                     max_loss = 0.0
-                    max_loss_inf = False
-                if max_profit <= 0.01 and not max_profit_inf:
+                if not max_profit_inf and abs(max_profit) <= zero_eps:
                     max_profit = 0.0
 
                 # ═══ CAPITAL ═══
@@ -598,6 +668,8 @@ def api_compute():
                 # max loss is used here so the fee is not counted twice.
                 underlying_cost = spot * contract_size if has_underlying else 0
                 collateral = abs(min(max_loss_ex_fee, 0.0))
+                if extremes["max_loss_inf"]:
+                    collateral = abs(min(min(pnl_ex_fee), 0.0))
                 if net_premium > 0:      # debit — premium is paid up front
                     total_cost = underlying_cost + net_premium
                 elif net_premium < 0:    # credit — post collateral for the worst case
@@ -613,12 +685,12 @@ def api_compute():
                         raw = max_profit / total_cost * 100
                         max_profit_pct = round(min(raw,999.9),2) if abs(raw)>500 else round(raw,2)
                     if max_loss_inf: max_loss_pct = None
-                    elif max_loss >= -0.01: max_loss_pct = 0.0
+                    elif max_loss >= -zero_eps: max_loss_pct = 0.0
                     else:
                         raw = max_loss / total_cost * 100
                         max_loss_pct = round(max(raw,-999.9),2) if abs(raw)>500 else round(raw,2)
                 else:
-                    max_profit_pct=None; max_loss_pct=0.0 if max_loss >= -0.01 else None
+                    max_profit_pct=None; max_loss_pct=0.0 if max_loss >= -zero_eps else None
 
                 # Breakevens
                 breakevens=[]
@@ -639,8 +711,12 @@ def api_compute():
                     "moneyness":overall_mn,"legs":[ld["description"] for ld in leg_details],
                     "legs_detail":leg_details,"contract_size":contract_size,
                     "net_premium":round(net_premium,2),"total_cost":round(total_cost,2),"total_fee":round(total_fee,2),
-                    "max_profit":round(max_profit,2),"max_profit_pct":max_profit_pct,
-                    "max_profit_inf":max_profit_inf,"max_loss":round(max_loss,2),
+                    # An unbounded extreme has no meaningful number — send null so no
+                    # consumer accidentally treats the probe value as the real maximum.
+                    "max_profit":None if max_profit_inf else round(max_profit,2),
+                    "max_profit_pct":max_profit_pct,
+                    "max_profit_inf":max_profit_inf,
+                    "max_loss":None if max_loss_inf else round(max_loss,2),
                     "max_loss_pct":max_loss_pct,"max_loss_inf":max_loss_inf,
                     "max_profit_price":round(max_profit_price,2),"max_loss_price":round(max_loss_price,2),
                     "breakevens":breakevens,"distance":distance_info,
@@ -652,7 +728,7 @@ def api_compute():
         log_event(f"Computed {total_combos} combinations across {len(strategy_ids)} strategies","ok")
         return jsonify({"spot":round(spot,2),"asset":asset,"expiry":expiry,
             "expiry_display":expiry_display,"contract_size":contract_size,
-            "include_fees":include_fees,
+            "include_fees":include_fees,"use_mark_prices":use_mark_prices,
             "fee_model":{"option_base":OPTION_TAKER_BASE_FEE,
                          "option_notional_rate":OPTION_TAKER_NOTIONAL_RATE,
                          "option_premium_cap":OPTION_PREMIUM_FEE_CAP,

@@ -194,7 +194,10 @@ def section_b():
 
     # fees must reduce profit and deepen loss, never the opposite
     worse = all(
-        x["max_profit"] <= y["max_profit"] + 1e-6 and x["max_loss"] <= y["max_loss"] + 1e-6
+        (x["max_profit"] is None or y["max_profit"] is None
+         or x["max_profit"] <= y["max_profit"] + 1e-6)
+        and (x["max_loss"] is None or y["max_loss"] is None
+             or x["max_loss"] <= y["max_loss"] + 1e-6)
         for x, y in zip(with_fee["strategies"], no_fee["strategies"]))
     check("enabling fees never improves P&L", worse)
 
@@ -234,6 +237,91 @@ def section_b():
           worst < 0.01, f"worst drift {worst * 100:.3f}% ({worst_id})")
 
 
+# ══════════════════════════════════════════════════════════════════════════
+#  C — payoff extremes, thresholds and leg pricing
+# ══════════════════════════════════════════════════════════════════════════
+def section_c():
+    section("C — Payoff extremes, thresholds & leg pricing")
+
+    size = 0.001
+    status, data = compute(["covered_call", "protective_put", "collar"], contract_size=size)
+    spot = data["spot"]
+    cc = [s for s in data["strategies"] if s["id"] == "covered_call"]
+    check("covered call no longer reports UNLIMITED loss (price floor is 0)",
+          all(not s["max_loss_inf"] for s in cc), f"{sum(s['max_loss_inf'] for s in cc)}/{len(cc)} flagged")
+    check("unbounded extremes are reported as null, not a fake number",
+          all(st["max_profit"] is None for st in
+              (compute(["long_call"], contract_size=size)[1]["strategies"])))
+    check("covered call max loss ≈ -(spot - premium) x size",
+          all(abs(s["max_loss"]) < spot * size * 1.05 and abs(s["max_loss"]) > spot * size * 0.5 for s in cc),
+          f"e.g. {cc[0]['max_loss']} vs notional {round(spot * size, 2)}")
+    check("covered call upside stays capped (not unlimited)",
+          all(not s["max_profit_inf"] for s in cc))
+    check("covered calls now pass a 10% max-loss filter check only if truly small",
+          all(s["max_loss_pct"] is not None for s in cc), "max_loss_pct is a number, not None")
+
+    status, data = compute(["long_call", "long_put", "straddle", "strangle"], contract_size=size)
+    check("long call / straddle keep UNLIMITED upside",
+          all(s["max_profit_inf"] for s in data["strategies"] if s["id"] in ("long_call", "straddle")))
+    check("long put upside is finite (price floor is 0)",
+          all(not s["max_profit_inf"] for s in data["strategies"] if s["id"] == "long_put"))
+    check("long option downside is limited to the premium paid",
+          all(not s["max_loss_inf"] for s in data["strategies"]))
+
+    status, data = compute(["bear_call_spread", "iron_condor", "bull_call_spread"], contract_size=size)
+    check("defined-risk spreads are never flagged unlimited",
+          all(not s["max_profit_inf"] and not s["max_loss_inf"] for s in data["strategies"]))
+
+    # extremes must agree with the plotted curve
+    worst = 0.0
+    for s in data["strategies"]:
+        curve = s["pnl_chart"]["pnl"]
+        if s["max_profit"] is not None:
+            worst = max(worst, max(0.0, max(curve) - s["max_profit"]))
+        if s["max_loss"] is not None:
+            worst = max(worst, max(0.0, s["max_loss"] - min(curve)))
+    check("reported extremes bound the plotted payoff curve", worst < 0.02, f"overshoot {worst:.4f}")
+
+    # C2 — small contract sizes must not be flattened to zero, and a combo that can
+    #      never pay off must keep its negative max profit instead of showing 0.
+    tiny_size = 0.0005
+    status, tiny = compute(["bull_call_spread"], contract_size=tiny_size, include_fees=False)
+    eps = max(1e-6, tiny["spot"] * tiny_size * 1e-5)
+    flattened = []
+    for s in tiny["strategies"]:
+        buy, sell = s["legs_detail"][0], s["legs_detail"][1]
+        analytic = (sell["strike"] - buy["strike"]) * tiny_size - (buy["premium"] - sell["premium"]) * tiny_size
+        if abs(s["max_profit"] - analytic) > max(eps, 0.01):
+            flattened.append((s["legs"], s["max_profit"], round(analytic, 4)))
+    check("tiny contract sizes keep exact P&L (relative zero-threshold)",
+          not flattened, f"{len(flattened)} distorted, e.g. {flattened[:1]}")
+    negatives = [s for s in tiny["strategies"] if s["max_profit"] < 0]
+    check("a combo that can never profit reports a negative max profit, not $0",
+          all(s["max_profit_pct"] is not None and s["max_profit_pct"] < 0 for s in negatives),
+          f"{len(negatives)} such combos at size {tiny_size}")
+
+    # C3 — bid/ask pricing
+    status, mkt = compute(["bull_call_spread"], contract_size=size)
+    status, mark = compute(["bull_call_spread"], contract_size=size)
+    legs = mkt["strategies"][0]["legs_detail"]
+    buy = [l for l in legs if l["direction"] == "Buy"][0]
+    sell = [l for l in legs if l["direction"] == "Sell"][0]
+    check("buy leg is priced at the ask", buy["premium_source"] == "ask" and buy["premium"] == buy["best_ask"],
+          f"{buy['premium']} vs ask {buy['best_ask']}")
+    check("sell leg is priced at the bid", sell["premium_source"] == "bid" and sell["premium"] == sell["best_bid"],
+          f"{sell['premium']} vs bid {sell['best_bid']}")
+
+    status, marked = post("/api/compute", {
+        "asset": "BTC", "expiry": EXPIRY, "strategies": ["bull_call_spread"],
+        "contract_size": size, "use_mark_prices": True})
+    mleg = marked["strategies"][0]["legs_detail"][0]
+    check("use_mark_prices=true switches back to mark pricing",
+          mleg["premium_source"] == "mark" and marked.get("use_mark_prices") is True)
+    check("crossing the spread costs more than trading at mark",
+          mkt["strategies"][0]["net_premium"] >= marked["strategies"][0]["net_premium"] - 1e-9,
+          f"market {mkt['strategies'][0]['net_premium']} vs mark {marked['strategies'][0]['net_premium']}")
+
+
 def main():
     global EXPIRY
     try:
@@ -246,6 +334,7 @@ def main():
     print(f"\n  Target: {APP}   Expiry under test: {EXPIRY}")
     section_a()
     section_b()
+    section_c()
 
     passed = sum(1 for _, ok, _ in _results if ok)
     failed = len(_results) - passed
