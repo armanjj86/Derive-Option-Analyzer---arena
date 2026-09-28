@@ -25,6 +25,18 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   const cdn = [...html.matchAll(/<script src="(https:\/\/[^"]+)"><\/script>/g)].map(m => m[1]);
   html = html.replace(/<script src="https:\/\/cdn[^>]*><\/script>/g, "");
 
+  // The app ships as an external bundle now; inline it so jsdom executes it in the
+  // same order a browser would (the tag is deferred, i.e. after parsing).
+  const localScripts = [...html.matchAll(/<script src="(\/static\/[^"]+)"[^>]*><\/script>/g)];
+  for (const m of localScripts) {
+    const code = await (await fetch(APP + m[1])).text();
+    html = html.replace(m[0], "");
+    // replacer function, not a string: "$$" in the bundle would otherwise be
+    // collapsed to "$" by String.replace's substitution rules
+    html = html.replace("</body>", () => `<script>${code}</script></body>`);
+  }
+  const cssLinks = [...html.matchAll(/<link rel="stylesheet" href="(\/static\/[^"]+)"/g)].map(m => m[1]);
+
   const vc = new VirtualConsole();
   const errors = [];
   vc.on("jsdomError", e => { if (!/scrollTo|scrollIntoView|Not implemented/.test(e.message)) errors.push(e.message.slice(0, 120)); });
@@ -49,6 +61,11 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   console.log("\n────────────────────────────────────────────────────────────\n  UI — boot\n────────────────────────────────────────────────────────────");
   check("only Chart.js is loaded from a CDN (annotation plugin removed)",
     cdn.length === 1 && /chart\.js/.test(cdn[0]), cdn.join(", "));
+  check("the page loads one external script bundle and one stylesheet",
+    localScripts.length === 1 && cssLinks.length === 1,
+    `${localScripts.length} js, ${cssLinks.length} css`);
+  check("static assets are cache-busted with a version hash",
+    /\?v=[0-9a-f]{6,}/.test(localScripts[0]?.[1] + cssLinks[0]), localScripts[0]?.[1]);
   check("12 strategy chips rendered", chips().length === 12, `${chips().length} chips`);
   check("expiry list populated", doc.getElementById("f-expiry").options.length > 1);
   check("market ticker shows a price", /\$/.test(doc.getElementById("mkt-price").textContent));
@@ -113,6 +130,19 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   check("rows rendered", rows.length > 0, `${rows.length} rows`);
   check("long tables scroll inside the card so the header can stick",
     rows.length <= 12 || !!doc.querySelector(".tbl-scroll.tall"));
+  const popHeader = [...doc.querySelectorAll("#results thead th")].some(th => /PoP/.test(th.textContent));
+  check("results table has a sortable PoP column", popHeader);
+  const popCell = rows[0].querySelector('[data-label="PoP"]');
+  check("each row shows a probability of profit", !!popCell && /%|—/.test(popCell.textContent),
+    popCell?.textContent.trim());
+  w.eval("sortTable('pop')");
+  await sleep(400);
+  const popsSorted = w.eval("JSON.stringify(DATA.strategies.map(s=>s.pop).slice(0,5))");
+  check("sorting by PoP works", JSON.parse(popsSorted).every((v, i, a) => i === 0 || a[i - 1] <= v),
+    popsSorted);
+  w.eval("sortTable('pop');sortTable('pop')");
+  await sleep(400);
+
   check("every cell carries a data-label for the mobile card view",
     [...rows[0].children].every(td => td.getAttribute("data-label")),
     [...rows[0].children].map(td => td.getAttribute("data-label")).join("|"));

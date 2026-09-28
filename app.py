@@ -12,6 +12,7 @@ FLASK_DEBUG       "1" to enable the Flask debugger    (default off)
 DERIVE_BASE_URL   upstream API base url               (default https://api.lyra.finance)
 """
 
+import hashlib
 import os
 import math
 import itertools
@@ -384,6 +385,61 @@ def leg_premium(opt, direction, use_mark=False):
     return 0.0, "none"
 
 
+def norm_cdf(x):
+    """Standard normal CDF."""
+    return 0.5 * (1.0 + math.erf(x / math.sqrt(2.0)))
+
+
+def lognormal_cdf(price, spot, sigma, t_years):
+    """P(S_T <= price) under a driftless lognormal (risk-neutral, r = 0).
+
+    ln(S_T/S_0) ~ N(-sigma^2 T / 2, sigma^2 T) — the standard assumption behind
+    the Black-Scholes prices the exchange quotes, so probabilities stay
+    consistent with the IVs shown in the ticket.
+    """
+    if price <= 0:
+        return 0.0
+    if math.isinf(price):
+        return 1.0
+    vol = sigma * math.sqrt(t_years)
+    if vol <= 0:
+        return 1.0 if price >= spot else 0.0
+    return norm_cdf((math.log(price / spot) + 0.5 * vol * vol) / vol)
+
+
+def probability_of_profit(legs, spot, contract_size, fee, breakevens, sigma, t_years):
+    """Chance the position expires profitable.
+
+    The payoff is piecewise linear, so the profitable set is the union of the
+    intervals between breakevens where the payoff is positive; each interval's
+    probability comes from the lognormal CDF.
+    """
+    if not sigma or sigma <= 0 or not t_years or t_years <= 0:
+        return None
+    edges = [0.0] + sorted(breakevens) + [math.inf]
+    total = 0.0
+    for lo, hi in zip(edges, edges[1:]):
+        probe = spot * 3 + lo if math.isinf(hi) else (lo + hi) / 2.0
+        if payoff_at(legs, spot, probe, contract_size, fee) > 0:
+            total += lognormal_cdf(hi, spot, sigma, t_years) - lognormal_cdf(lo, spot, sigma, t_years)
+    return max(0.0, min(1.0, total))
+
+
+def position_iv(leg_details):
+    """Vega-weighted average implied vol of the option legs (simple mean fallback)."""
+    ivs, weights = [], []
+    for leg in leg_details:
+        if leg["opt_type"] == "underlying":
+            continue
+        iv = (leg.get("greeks") or {}).get("iv")
+        if iv and iv > 0:
+            ivs.append(iv)
+            weights.append(abs((leg.get("greeks") or {}).get("vega") or 0) or 1.0)
+    if not ivs:
+        return None
+    return sum(i * w for i, w in zip(ivs, weights)) / sum(weights)
+
+
 def payoff_at(legs, spot, price, contract_size=1, fee=0.0):
     """Net P&L of the position at `price` on expiry day."""
     total = 0.0
@@ -544,8 +600,23 @@ def compute_payoff(legs, spot, contract_size=1, n_points=250):
 #  ROUTES
 # ═══════════════════════════════════════════════════════════════════════════════
 
+def asset_version():
+    """Short hash of the static bundle so browsers pick up new builds immediately."""
+    digest = hashlib.md5()
+    for name in ("app.css", "app.js"):
+        path = os.path.join(app.static_folder or "static", name)
+        try:
+            with open(path, "rb") as fh:
+                digest.update(fh.read())
+        except OSError:
+            digest.update(name.encode())
+    return digest.hexdigest()[:10]
+
+
 @app.route("/")
-def index(): return render_template("index.html")
+def index():
+    # asset_version busts the browser cache whenever app.css/app.js change
+    return render_template("index.html", asset_version=asset_version())
 
 
 @app.route("/api/strategies")
@@ -805,11 +876,16 @@ def api_compute():
         tickers=fetch_tickers(asset,expiry,"option")
         if not tickers: return jsonify({"error":f"No options for {asset} expiring {expiry}"}),404
 
+        # Exact time to expiry (Derive settles at 08:00 UTC) — used by the
+        # probability-of-profit model. Floored at one hour so an expiry that is
+        # minutes away cannot blow up the maths.
+        t_years = max((parse_expiry_date(expiry) - utcnow()).total_seconds(), 3600.0) / (365.0 * 86400.0)
+
         calls,puts=[],[]; spot=0.0; expiry_display=""
         for t in tickers:
             info=parse_option_name(t["instrument_name"])
             if not info or info["underlying"].upper() != asset.upper(): continue
-            if not expiry_display: expiry_display=datetime.strptime(info["expiry"],"%Y%m%d").strftime("%b %d, %Y")
+            if not expiry_display: expiry_display=parse_expiry_date(info["expiry"]).strftime("%b %d, %Y")
             best_ask=float(t.get("best_ask_price",0)); best_bid=float(t.get("best_bid_price",0))
             mark_price=float(t.get("mark_price",0)); idx_price=float(t.get("index_price",0))
             if idx_price>0: spot=idx_price
@@ -942,6 +1018,11 @@ def api_compute():
                 # positive = net debit paid, negative = net credit received.
                 net_premium = sum(l["direction"] * l["premium"] for l in calc_legs
                                   if l["opt_type"] != "underlying") * contract_size
+                # ═══ PROBABILITY OF PROFIT ═══
+                iv_avg = position_iv(leg_details)
+                pop = probability_of_profit(calc_legs, spot, contract_size, total_fee,
+                                            breakevens, iv_avg, t_years)
+
                 overall_mn=strategy_moneyness(leg_details,spot)
                 results.append({"id":strategy["id"],"name":f"{strategy['emoji']} {strategy['name']}",
                     "description":strategy["description"],"category":strategy["category"],"risk":strategy["risk"],
@@ -957,6 +1038,9 @@ def api_compute():
                     "max_loss_pct":max_loss_pct,"max_loss_inf":max_loss_inf,
                     "max_profit_price":round(max_profit_price,2),"max_loss_price":round(max_loss_price,2),
                     "breakevens":breakevens,"distance":distance_info,
+                    "pop":None if pop is None else round(pop*100,1),
+                    "iv_avg":None if iv_avg is None else round(iv_avg,4),
+                    "t_years":round(t_years,6),
                     "pnl_chart":{"prices":[round(p,2) for p in prices],"pnl":pnl,"spot":round(spot,2),"breakevens":breakevens}})
                 strategy_combos+=1
             total_combos+=strategy_combos

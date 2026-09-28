@@ -530,6 +530,69 @@ def section_g():
     check("a non-numeric max_combos is rejected", status == 400, str(bad)[:60])
 
 
+# ══════════════════════════════════════════════════════════════════════════
+#  H — probability of profit
+# ══════════════════════════════════════════════════════════════════════════
+def section_h():
+    section("H — Probability of profit")
+
+    import math
+
+    def ncdf(x):
+        return 0.5 * (1 + math.erf(x / math.sqrt(2)))
+
+    status, data = compute(["long_call", "long_put", "iron_condor", "straddle", "covered_call"],
+                           contract_size=0.01)
+    spot = data["spot"]
+    strategies = data["strategies"]
+
+    check("every combination carries a PoP, an IV and a time to expiry",
+          all(s["pop"] is not None and s["iv_avg"] > 0 and s["t_years"] > 0 for s in strategies))
+    check("PoP is a probability in [0, 100]",
+          all(0 <= s["pop"] <= 100 for s in strategies))
+
+    # a single long call is exactly P(S_T > breakeven) under the lognormal model
+    lc = [s for s in strategies if s["id"] == "long_call"][0]
+    vol = lc["iv_avg"] * math.sqrt(lc["t_years"])
+    want = (1 - ncdf((math.log(lc["breakevens"][0] / spot) + 0.5 * vol * vol) / vol)) * 100
+    check("long call PoP matches the closed-form probability",
+          abs(lc["pop"] - want) < 0.2, f"reported {lc['pop']}% vs analytic {want:.1f}%")
+
+    # deep OTM should be less likely than near-the-money for the same structure
+    calls = sorted([s for s in strategies if s["id"] == "long_call"],
+                   key=lambda s: s["legs_detail"][0]["strike"])
+    check("PoP falls as the long call gets further out of the money",
+          all(a["pop"] >= b["pop"] - 0.01 for a, b in zip(calls, calls[1:])),
+          f"{[s['pop'] for s in calls][:5]}…")
+
+    # a condor only wins inside its wings; both breakevens must bound the region
+    condors = [s for s in strategies if s["id"] == "iron_condor" and len(s["breakevens"]) == 2]
+    check("range strategies report a middle-of-the-road PoP",
+          all(0 < s["pop"] < 100 for s in condors), f"{[s['pop'] for s in condors][:4]}")
+
+    # fees shrink the profitable window, so PoP must not increase when they are on
+    status, no_fee = compute(["iron_condor"], contract_size=0.01, include_fees=False)
+    status, with_fee = compute(["iron_condor"], contract_size=0.01, include_fees=True)
+    pairs = list(zip(with_fee["strategies"], no_fee["strategies"]))
+    check("adding fees never raises the probability of profit",
+          all(a["pop"] <= b["pop"] + 1e-9 for a, b in pairs),
+          f"e.g. {pairs[0][0]['pop']}% with fees vs {pairs[0][1]['pop']}% without")
+
+    # cheaper execution (RFQ) widens the window again
+    status, rfq = post("/api/compute", {"asset": "BTC", "expiry": EXPIRY, "contract_size": 0.01,
+                                        "strategies": ["iron_condor"], "fee_mode": "rfq"})
+    check("cheaper RFQ fees raise PoP versus taker fees",
+          rfq["strategies"][0]["pop"] >= with_fee["strategies"][0]["pop"],
+          f"rfq {rfq['strategies'][0]['pop']}% vs taker {with_fee['strategies'][0]['pop']}%")
+
+    # a structure that can never pay off must report 0
+    status, tiny = compute(["iron_condor"], contract_size=0.001)
+    unprofitable = [s for s in tiny["strategies"] if not s["breakevens"]]
+    check("a structure with no profitable region reports 0% (not null)",
+          all(s["pop"] == 0 for s in unprofitable) if unprofitable else True,
+          f"{len(unprofitable)} unprofitable combos at 0.001 with taker fees")
+
+
 def main():
     global EXPIRY
     try:
@@ -547,6 +610,7 @@ def main():
     section_e()
     section_f()
     section_g()
+    section_h()
 
     passed = sum(1 for _, ok, _ in _results if ok)
     failed = len(_results) - passed
