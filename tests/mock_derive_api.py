@@ -18,8 +18,10 @@ app = Flask(__name__)
 random.seed(7)
 
 PORT = 8899
-SPOT = {"BTC": 117250.37, "ETH": 4212.55}
-SPOT_24H = {"BTC": 114980.10, "ETH": 4301.22}
+SPOT = {"BTC": 117250.37, "ETH": 4212.55, "SOL": 214.88, "XAUT": 3312.40}
+SPOT_24H = {"BTC": 114980.10, "ETH": 4301.22, "SOL": 208.15, "XAUT": 3298.05}
+# SOL/XAUT have options too; USDC is cash-only and must not appear in the picker
+CASH_ONLY = {"USDC": 1.0}
 EXPIRY_OFFSETS_DAYS = (2, 5, 9, 16, 30, 60)
 
 
@@ -30,7 +32,7 @@ def expiries():
 
 def strikes(asset):
     spot = SPOT[asset]
-    step = 2000 if asset == "BTC" else 100
+    step = 10 ** round(math.log10(spot / 60))   # ~11 strikes spanning a sensible range
     mid = round(spot / step) * step
     return [mid + i * step for i in range(-5, 6)]
 
@@ -54,15 +56,27 @@ def black_scholes(S, K, T, sigma, is_call):
 
 @app.post("/public/get_all_currencies")
 def get_all_currencies():
-    return jsonify({"result": [
-        {"currency": c, "spot_price": str(SPOT[c]), "spot_price_24h": str(SPOT_24H[c])}
+    result = [
+        {"currency": c, "spot_price": str(SPOT[c]), "spot_price_24h": str(SPOT_24H[c]),
+         "market_type": "ALL",
+         "option": {"name": f"{c}-OPTION", "address": "0x0", "universes": []},
+         "perp": {"name": f"{c}-PERP", "address": "0x0", "universes": []},
+         "spot": []}
         for c in SPOT
-    ]})
+    ]
+    result += [
+        {"currency": c, "spot_price": str(p), "spot_price_24h": str(p),
+         "market_type": "CASH", "option": None, "perp": None, "spot": []}
+        for c, p in CASH_ONLY.items()
+    ]
+    return jsonify({"result": result})
 
 
 @app.post("/public/get_instruments")
 def get_instruments():
-    currency = (request.json or {}).get("currency", "BTC")
+    currency = str((request.json or {}).get("currency", "BTC")).upper()
+    if currency not in SPOT:
+        return jsonify({"result": []})
     result = [
         {"instrument_name": f"{currency}-{e}-{int(k)}-{t}", "is_active": True,
          "instrument_type": "option", "base_currency": currency}
@@ -79,9 +93,11 @@ def get_instruments():
 @app.post("/public/get_tickers")
 def get_tickers():
     body = request.json or {}
-    currency = body.get("currency", "BTC")
+    currency = str(body.get("currency", "BTC")).upper()
     instrument_type = body.get("instrument_type", "option")
-    spot = SPOT[currency]
+    spot = SPOT.get(currency, 0)
+    if not spot:
+        return jsonify({"result": {"tickers": {}}})
 
     if instrument_type == "perp":
         return jsonify({"result": {"tickers": {f"{currency}-PERP": {

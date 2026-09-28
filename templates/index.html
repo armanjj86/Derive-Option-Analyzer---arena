@@ -1033,10 +1033,7 @@ body.zen-mode .zen-floating-bar {
     <div class="flt-row">
       <div>
         <label>Asset</label>
-        <select id="f-asset">
-          <option value="BTC">Bitcoin</option>
-          <option value="ETH">Ethereum</option>
-        </select>
+        <select id="f-asset"><option value="BTC">Loading…</option></select>
       </div>
       <div><label>Expiry</label><select id="f-expiry" disabled><option>Loading…</option></select></div>
       <div><label>Strategy</label><div class="chips" id="chips"></div></div>
@@ -1125,7 +1122,16 @@ let SPOT_PRICE=0,autoTimer=null;
 let sortState={col:null,dir:0};
 let CHART_RANGE=null;   // chart zoom for this session only (never persisted)
 const ODO_MAX_ANIMATED_ROWS=20;  // rows beyond this render their numbers as plain text
-const DEFAULT_CS={"BTC":0.001,"ETH":0.01};
+const ASSET_NAMES={BTC:"Bitcoin",ETH:"Ethereum",SOL:"Solana",XAUT:"Tether Gold",DOGE:"Dogecoin",
+                   AVAX:"Avalanche",LINK:"Chainlink",ARB:"Arbitrum",OP:"Optimism",SUI:"Sui",
+                   MATIC:"Polygon",BNB:"BNB",XRP:"XRP",TIA:"Celestia",WSTETH:"Lido wstETH"};
+let ASSETS=[];                                   // option underlyings from the exchange
+const DEFAULT_CS={"BTC":0.001,"ETH":0.01};       // fallback until /api/assets answers
+function defaultContractSize(asset){
+  const a = ASSETS.find(x=>x.currency===asset);
+  if(a && a.default_contract_size) return a.default_contract_size;
+  return DEFAULT_CS[asset] || 0.001;
+}
 const SETTINGS={refreshInterval:0,fontScale:1,theme:"dark",chartRange:30,blur:12,orbs:true,fontFamily:"mixed",palette:"default",maxLossFilter:10,includeFees:true,feeMode:"taker",marginType:"SM"};
 
 /* MINI CHART SVGs — shapes preserved, dual-color via clipPath (unique IDs) */
@@ -1187,6 +1193,11 @@ class GlassDropdown {
       } else if (val === "ETH") {
         return `<span class="dd-logo" style="width:18px;height:18px;display:inline-flex;align-items:center;justify-content:center;flex-shrink:0;margin-right:6px"><svg viewBox="0 0 32 32" xmlns="http://www.w3.org/2000/svg" style="width:100%;height:100%;display:block"><circle cx="16" cy="16" r="16" fill="#627EEA"/><path d="M16 5.5v7.75l6.5 2.91L16 5.5z" fill="#FFF" fill-opacity=".6"/><path d="M16 5.5L9.5 16.16l6.5-2.91V5.5z" fill="#FFF"/><path d="M16 22.02v4.48l6.51-9.13L16 22.02z" fill="#FFF" fill-opacity=".6"/><path d="M16 22.02l-6.5-5.38 6.5 9.13v-4.48z" fill="#FFF"/><path d="M16 20.67l6.5-3.8L16 14.5l-6.5 2.37 6.5 3.8z" fill="#FFF" fill-opacity=".2"/><path d="M9.5 16.87l6.5 3.8V14.5l-6.5 2.37z" fill="#FFF" fill-opacity=".6"/></svg></span><span style="font-weight:700">Ethereum</span>`;
       }
+      // any other listed underlying: a neutral coin badge with its ticker
+      if (val && ASSETS.some(a => a.currency === val)) {
+        const initials = val.slice(0, 3);
+        return `<span class="dd-logo" style="width:18px;height:18px;display:inline-flex;align-items:center;justify-content:center;flex-shrink:0;margin-right:6px;border-radius:50%;background:var(--accent-g);color:#fff;font-size:8px;font-weight:900;letter-spacing:-0.3px">${initials}</span><span style="font-weight:700">${text}</span>`;
+      }
       return text;
     };
     const opts = this.native.options;
@@ -1242,11 +1253,34 @@ class GlassDropdown {
 
 /* INIT */
 
+/* Every underlying the exchange lists an option market for. One call at boot —
+   option chains are still only fetched for the asset the user actually picks. */
+async function loadAssets(){
+  const sel=document.getElementById("f-asset");
+  try{
+    const r=await(await fetch("/api/assets")).json();
+    if(r.error||!r.assets?.length) throw new Error(r.error||"no assets");
+    ASSETS=r.assets;
+    const previous=SETTINGS.asset||sel.value;
+    sel.innerHTML=ASSETS.map(a=>`<option value="${a.currency}">${ASSET_NAMES[a.currency]||a.currency}</option>`).join("");
+    sel.value=ASSETS.some(a=>a.currency===previous)?previous:ASSETS[0].currency;
+  }catch(e){
+    console.error("Asset list error:",e);
+    ASSETS=[{currency:"BTC",default_contract_size:0.001},{currency:"ETH",default_contract_size:0.01}];
+    sel.innerHTML=`<option value="BTC">Bitcoin</option><option value="ETH">Ethereum</option>`;
+  }
+  if(window._glassDropdowns?.asset) window._glassDropdowns.asset.refresh();
+  if(!document.getElementById("f-size").dataset.userSet){
+    document.getElementById("f-size").value=defaultContractSize(sel.value);
+  }
+}
+
 document.addEventListener("DOMContentLoaded",async()=>{
   loadSettings();
   STRATS=await(await fetch("/api/strategies")).json();
   // Initialize glass dropdowns
   window._glassDropdowns = {};
+  await loadAssets();
   window._glassDropdowns.asset = new GlassDropdown(document.getElementById("f-asset"), {
     onChange: async()=>{
       _cachedExpiry=null;
@@ -1254,8 +1288,10 @@ document.addEventListener("DOMContentLoaded",async()=>{
       setMarketBarShimmer();
       setSummaryBoxShimmer();
       const a = document.getElementById("f-asset").value;
+      SETTINGS.asset = a;
+      localStorage.setItem("d_settings", JSON.stringify(SETTINGS));
       if(!document.getElementById("f-size").dataset.userSet){
-        document.getElementById("f-size").value = DEFAULT_CS[a] || 0.001;
+        document.getElementById("f-size").value = defaultContractSize(a);
       }
       await loadExp();
       if(document.getElementById("f-expiry").value && SEL.size > 0 && DATA) {
@@ -1783,7 +1819,7 @@ async function loadExp(){
     window._glassDropdowns.expiry.setEnabled(false);
     window._glassDropdowns.expiry.btn.innerHTML = `<div style="display:flex;align-items:center;gap:8px;width:100%"><span class="spin" style="width:12px;height:12px;border-width:2px;margin:0"></span><div class="skeleton-box" style="width:85px;height:14px;border-radius:4px"></div></div>`;
   }
-  if(!document.getElementById("f-size").dataset.userSet)document.getElementById("f-size").value=DEFAULT_CS[a]||0.001;
+  if(!document.getElementById("f-size").dataset.userSet)document.getElementById("f-size").value=defaultContractSize(a);
   try{const r=await(await fetch("/api/expiries",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({asset:a})})).json();
     if(r.error)throw new Error(r.error);
     s.innerHTML='<option value="">— Select —</option>';

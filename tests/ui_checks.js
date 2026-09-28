@@ -53,6 +53,29 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   check("expiry list populated", doc.getElementById("f-expiry").options.length > 1);
   check("market ticker shows a price", /\$/.test(doc.getElementById("mkt-price").textContent));
 
+  console.log("\n────────────────────────────────────────────────────────────\n  UI — asset picker (from the exchange)\n────────────────────────────────────────────────────────────");
+  const assetSel = doc.getElementById("f-asset");
+  const listed = w.eval("JSON.stringify(ASSETS.map(a=>a.currency))");
+  check("asset dropdown is built from /api/assets, not hardcoded",
+    assetSel.options.length === JSON.parse(listed).length && assetSel.options.length >= 2, listed);
+  check("no placeholder left in the picker", ![...assetSel.options].some(o => /Loading/.test(o.textContent)));
+  const other = [...assetSel.options].map(o => o.value).find(v => v !== "BTC" && v !== "ETH");
+  if (other) {
+    assetSel.value = other;
+    await w.eval(`(async()=>{ document.getElementById("f-asset").value=${JSON.stringify(other)};
+                               await loadExp(); })()`);
+    await sleep(1500);
+    check(`switching to ${other} loads only that asset's expiries`,
+      doc.getElementById("f-expiry").options.length > 1,
+      `${doc.getElementById("f-expiry").options.length - 1} expiries`);
+    check(`contract size adapts to ${other}`,
+      parseFloat(doc.getElementById("f-size").value) > 0,
+      `size=${doc.getElementById("f-size").value}`);
+    assetSel.value = "BTC";
+    await w.eval('(async()=>{ document.getElementById("f-asset").value="BTC"; await loadExp(); })()');
+    await sleep(1200);
+  }
+
   console.log("\n────────────────────────────────────────────────────────────\n  UI — single strategy selection\n────────────────────────────────────────────────────────────");
   check("chips form a radio group", doc.getElementById("chips").getAttribute("role") === "radiogroup");
   check("exactly one strategy selected on load", selected().length === 1, JSON.stringify(selected()));

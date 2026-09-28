@@ -456,6 +456,46 @@ def section_e():
     check("margin request validates its inputs", status == 400, str(bad)[:60])
 
 
+# ══════════════════════════════════════════════════════════════════════════
+#  F — dynamic asset list (only the chosen asset's chain is fetched)
+# ══════════════════════════════════════════════════════════════════════════
+def section_f():
+    section("F — Asset discovery")
+
+    status, data = get("/api/assets")
+    assets = data.get("assets", [])
+    names = [a["currency"] for a in assets]
+    check("GET /api/assets lists the exchange's option underlyings",
+          status == 200 and len(assets) >= 2, f"{names}")
+    check("cash-only currencies (no option market) are excluded", "USDC" not in names, f"{names}")
+    check("every asset carries a spot price and a sensible default size",
+          all(a["spot"] > 0 and a["default_contract_size"] > 0 for a in assets))
+
+    by_name = {a["currency"]: a for a in assets}
+    check("default size targets a ~$100 notional (BTC 0.001 / ETH 0.01)",
+          by_name.get("BTC", {}).get("default_contract_size") == 0.001
+          and by_name.get("ETH", {}).get("default_contract_size") == 0.01,
+          f"BTC={by_name.get('BTC',{}).get('default_contract_size')} ETH={by_name.get('ETH',{}).get('default_contract_size')}")
+
+    # a newly listed asset must work end to end without any code change
+    extra = next((n for n in names if n not in ("BTC", "ETH")), None)
+    check("the exchange lists at least one asset beyond BTC/ETH", extra is not None, f"{names}")
+    if extra:
+        status, exp = post("/api/expiries", {"asset": extra})
+        check(f"{extra}: expiries load", status == 200 and exp.get("expiries"), str(exp)[:60])
+        status, res = post("/api/compute", {
+            "asset": extra, "expiry": exp["expiries"][0]["date"],
+            "strategies": ["long_call", "iron_condor"],
+            "contract_size": by_name[extra]["default_contract_size"]})
+        check(f"{extra}: strategies compute end to end",
+              status == 200 and len(res.get("strategies", [])) > 0,
+              f"{len(res.get('strategies', []))} combos at size {by_name[extra]['default_contract_size']}")
+
+    status, res = post("/api/compute", {"asset": "USDC", "expiry": EXPIRY,
+                                        "strategies": ["long_call"], "contract_size": 1})
+    check("an asset without an option chain fails cleanly", status >= 400, str(res)[:60])
+
+
 def main():
     global EXPIRY
     try:
@@ -471,6 +511,7 @@ def main():
     section_c()
     section_d()
     section_e()
+    section_f()
 
     passed = sum(1 for _, ok, _ in _results if ok)
     failed = len(_results) - passed

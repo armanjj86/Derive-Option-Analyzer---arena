@@ -551,6 +551,84 @@ def index(): return render_template("index.html")
 def api_strategies(): return jsonify(get_all_strategies())
 
 
+def default_contract_size(spot):
+    """A sensible default trade size for any asset: the power of ten whose
+    notional is closest to ~$100, so BTC -> 0.001, ETH -> 0.01, SOL -> 1."""
+    if not spot or spot <= 0:
+        return 1.0
+    exponent = round(math.log10(100.0 / spot))
+    return float(min(max(10 ** exponent, 0.0001), 1000))
+
+
+def fetch_currencies():
+    """All currencies configured on the exchange (cached — it is one call)."""
+    cached = cache_get("all_currencies", ttl=300)
+    if cached is not None:
+        return cached
+    resp = http_requests.post(f"{BASE_URL}/public/get_all_currencies",
+                              headers={"accept": "application/json",
+                                       "content-type": "application/json"},
+                              json={}, timeout=15)
+    resp.raise_for_status()
+    data = resp.json().get("result", []) or []
+    cache_set("all_currencies", data)
+    return data
+
+
+def currency_has_options(entry):
+    """True when the exchange has an option asset registered for this currency.
+
+    v3 exposes an `option` asset entry; older payloads only carry `market_type`,
+    so both shapes are accepted and we never have to probe instruments per asset.
+    """
+    if entry.get("option"):
+        return True
+    market_type = str(entry.get("market_type") or "").upper()
+    return market_type in ("ALL", "SRM_OPTION_ONLY")
+
+
+@app.route("/api/assets", methods=["GET", "POST"])
+def api_assets():
+    """Tradable option underlyings, straight from the exchange.
+
+    One upstream call lists every currency together with its registered assets,
+    so the UI can offer exactly what Derive supports without fetching an option
+    chain per asset — chains are only loaded for the asset the user picks.
+    """
+    try:
+        assets = []
+        for entry in fetch_currencies():
+            currency = str(entry.get("currency", "")).upper()
+            if not currency or not currency_has_options(entry):
+                continue
+            try:
+                spot = float(entry.get("spot_price") or 0)
+            except (TypeError, ValueError):
+                spot = 0.0
+            try:
+                spot_24h = float(entry.get("spot_price_24h") or 0)
+            except (TypeError, ValueError):
+                spot_24h = 0.0
+            assets.append({
+                "currency": currency,
+                "spot": round(spot, 2),
+                "spot_24h": round(spot_24h, 2),
+                "change_24h": round((spot - spot_24h) / spot_24h * 100, 2) if spot_24h else 0.0,
+                "has_perp": bool(entry.get("perp")),
+                "default_contract_size": default_contract_size(spot),
+            })
+        assets.sort(key=lambda a: (-a["spot"], a["currency"]))
+        if not assets:
+            return jsonify({"error": "No option markets available"}), 503
+        log_event(f"Loaded {len(assets)} option underlyings from the exchange")
+        return jsonify({"assets": assets})
+    except http_requests.RequestException as e:
+        return jsonify({"error": f"Could not reach the exchange: {e}"}), 502
+    except Exception as e:
+        log_event(f"/api/assets failed: {e}", "error")
+        return jsonify({"error": str(e)}), 500
+
+
 MARGIN_TYPES = ("SM", "PM2")
 
 
