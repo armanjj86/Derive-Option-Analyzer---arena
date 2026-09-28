@@ -1018,7 +1018,7 @@ body.zen-mode .zen-floating-bar {
         </select>
       </div>
       <div><label>Expiry</label><select id="f-expiry" disabled><option>Loading…</option></select></div>
-      <div><label>Strategies</label><div class="chips" id="chips"></div></div>
+      <div><label>Strategy</label><div class="chips" id="chips"></div></div>
       <div><label> </label>
         <button class="btn btn-p" id="go-btn" disabled onclick="compute()">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
@@ -1051,7 +1051,7 @@ body.zen-mode .zen-floating-bar {
         <span>🔍 Active Filters:</span>
         <span class="flt-mini-tag" id="mini-asset">BTC</span>
         <span class="flt-mini-tag" id="mini-exp">—</span>
-        <span class="flt-mini-tag" id="mini-strats">0 Strats</span>
+        <span class="flt-mini-tag" id="mini-strats">—</span>
       </div>
       <div style="display:flex;align-items:center;gap:8px">
         <button class="btn btn-p" onclick="compute()" style="padding:4px 12px;font-size:11px">⚡ Re-Analyze</button>
@@ -1067,7 +1067,7 @@ body.zen-mode .zen-floating-bar {
       <div class="spot-r"><div class="lb">Expiry</div><div style="font-size:calc(15px*var(--font-scale,1));font-weight:700" id="s-exp">—</div></div>
       <div class="spot-r"><div class="lb">Contract Size</div><div style="font-size:calc(15px*var(--font-scale,1));font-weight:700" id="s-cs">—</div></div>
     </div>
-    <div id="results"><div class="empty"><div class="ic">📊</div><div class="tt">Ready to Analyze</div><div class="tx">Select an asset, expiry, and strategies then click <b>Analyze</b>.</div></div></div>
+    <div id="results"><div class="empty"><div class="ic">📊</div><div class="tt">Ready to Analyze</div><div class="tx">Select an asset, an expiry and one strategy, then click <b>Analyze</b>.</div></div></div>
   </main>
 </div>
 
@@ -1533,7 +1533,9 @@ function toggleFilterCollapse(forceState) {
     document.getElementById("mini-asset").textContent = document.getElementById("f-asset")?.value || "BTC";
     const expText = document.getElementById("f-expiry")?.options[document.getElementById("f-expiry")?.selectedIndex]?.textContent || "—";
     document.getElementById("mini-exp").textContent = expText;
-    document.getElementById("mini-strats").textContent = `${SEL.size} Strats`;
+    const activeId = [...SEL][0];
+    const active = STRATS.find(x => x.id === activeId);
+    document.getElementById("mini-strats").textContent = active ? `${active.emoji} ${active.name}` : "No strategy";
   }
 }
 
@@ -1699,6 +1701,8 @@ function updateSizeUsd(){
 
 /* CHIPS with TOOLTIPS */
 function renderChips(){
+  document.getElementById("chips").setAttribute("role","radiogroup");
+  document.getElementById("chips").setAttribute("aria-label","Strategy");
   document.getElementById("chips").innerHTML=STRATS.map(s=>{
     let tipLegs=s.legs.map(l=>{
       const isBuy=l.dir==="buy"||l.dir==="hold";
@@ -1707,18 +1711,37 @@ function renderChips(){
         `${dLabel} ${l.type.charAt(0).toUpperCase()+l.type.slice(1)}`;
       return`<div class="tooltip-leg"><span class="tooltip-dir ${dCls}">${dLabel}</span><span>${desc}</span></div>`;
     }).join("");
-    // tabindex + title: on touch devices the hover tooltip never appears
+    // title: on touch devices the hover tooltip never appears
     const plain = s.legs.map(l => `${(l.dir === "buy" || l.dir === "hold") ? "BUY" : "SELL"} ${l.type === "underlying" ? "underlying" : l.type}`).join("  •  ");
-    return`<div class="chip ${SEL.has(s.id)?'on':''}" tabindex="0" title="${s.name} — ${plain}" onclick="tog('${s.id}',this)">${s.emoji} ${s.name}<div class="tooltip">${tipLegs}</div></div>`;
+    const on = SEL.has(s.id);
+    return`<div class="chip ${on?'on':''}" role="radio" aria-checked="${on}" tabindex="${on?0:-1}" data-sid="${s.id}" title="${s.name} — ${plain}" onclick="selectStrategy('${s.id}')" onkeydown="onChipKey(event,'${s.id}')">${s.emoji} ${s.name}<div class="tooltip">${tipLegs}</div></div>`;
   }).join("");
 }
-function tog(id,el){
-  SEL.has(id)?SEL.delete(id):SEL.add(id);
-  el.classList.toggle("on");
+
+/* Exactly one strategy is analysed at a time — comparing unrelated strategies in
+   one table was confusing, and a single choice keeps the combo list readable. */
+function selectStrategy(id){
+  if(SEL.has(id) && SEL.size === 1) return;   // already active
+  SEL.clear(); SEL.add(id);
+  document.querySelectorAll("#chips .chip").forEach(c=>{
+    const active = c.dataset.sid === id;
+    c.classList.toggle("on", active);
+    c.setAttribute("aria-checked", String(active));
+    c.tabIndex = active ? 0 : -1;
+  });
   updBtn();
-  if(DATA && SEL.size > 0 && document.getElementById("f-expiry").value) {
-    compute();
-  }
+  if(DATA && document.getElementById("f-expiry").value) compute();
+}
+
+/* Keyboard support for the radio group: Enter/Space picks, arrows move */
+function onChipKey(e, id){
+  const chips = [...document.querySelectorAll("#chips .chip")];
+  const i = chips.findIndex(c => c.dataset.sid === id);
+  if(e.key === "Enter" || e.key === " "){ e.preventDefault(); selectStrategy(id); return; }
+  let next = null;
+  if(e.key === "ArrowRight" || e.key === "ArrowDown") next = chips[(i + 1) % chips.length];
+  if(e.key === "ArrowLeft"  || e.key === "ArrowUp")   next = chips[(i - 1 + chips.length) % chips.length];
+  if(next){ e.preventDefault(); selectStrategy(next.dataset.sid); next.focus(); }
 }
 
 /* EXPIRIES */
@@ -2066,7 +2089,7 @@ function render(d){
   const fltInfo = (!isNaN(maxLossLimit) && maxLossLimit > 0) ? `<span style="width:1px;height:14px;background:var(--border);margin:0 10px;opacity:.7"></span><span style="color:var(--text-dim);font-size:11px;font-weight:600">🛡️ ≤${maxLossLimit}% Loss Filter</span>` : "";
   let h=`<div class="rhdr"><h2>Strategy Analysis</h2><div class="combo-status-pill"><span class="odo-cell" data-key="header_cnt_s" data-val="${stratsToRender.length}" style="font-family:var(--font-mono);font-weight:800;color:var(--accent-l)">${stratsToRender.length}</span><span style="margin:0 4px;color:var(--text-mute)">/</span><span class="odo-cell" data-key="header_cnt_t" data-val="${d.strategies.length}" style="font-family:var(--font-mono);font-weight:800;color:var(--accent-l)">${d.strategies.length}</span><span style="margin-left:6px;color:var(--text);font-weight:700">Combos</span>${fltInfo}</div></div>`;
   if(!stratsToRender.length){
-    h+=`<div class="empty" style="padding:40px 20px"><div class="ic">🛡️</div><div class="tt">No Combinations Pass Filter</div><div class="tx" style="margin-top:8px">None of the ${d.strategies.length} option combinations have a Max Loss ≤ <b>${maxLossLimit}%</b> of capital.<br>Try increasing your Max Loss limit or selecting different strategies.</div></div>`;
+    h+=`<div class="empty" style="padding:40px 20px"><div class="ic">🛡️</div><div class="tt">No Combinations Pass Filter</div><div class="tx" style="margin-top:8px">None of the ${d.strategies.length} option combinations have a Max Loss ≤ <b>${maxLossLimit}%</b> of capital.<br>Try increasing your Max Loss limit or picking a different strategy.</div></div>`;
     document.getElementById("results").innerHTML=h;
     return;
   }
@@ -2137,6 +2160,14 @@ function render(d){
   });
 }
 
+/* Jump from the reference tab straight into the analyzer for that strategy */
+function analyzeFromGuide(id){
+  switchTab("analyzer");
+  renderChips();
+  selectStrategy(id);
+  document.getElementById("chips")?.scrollIntoView({behavior:"smooth", block:"center"});
+}
+
 /* STRATEGIES GUIDE */
 function renderStratsGuide(){
   let h='<h2 style="font-size:18px;font-weight:800;margin-bottom:4px">Strategies Reference</h2><p style="color:var(--text-dim);font-size:13px;margin-bottom:16px">Quick reference for all supported options strategies.</p><div class="strat-grid">';
@@ -2150,7 +2181,7 @@ function renderStratsGuide(){
     }).join("");
     let featuresHtml=s.features?s.features.map(f=>`<span class="feat">${f}</span>`).join(""):"";
     let miniChart=MINI_CHARTS[s.id]||"";
-    h+=`<div class="strat-card">
+    h+=`<div class="strat-card" role="button" tabindex="0" title="Analyze this strategy" onclick="analyzeFromGuide('${s.id}')" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();analyzeFromGuide('${s.id}')}" style="cursor:pointer">
       <h3>${s.emoji} ${s.name}</h3>
       <div class="market">${s.market||s.risk}</div>
       <div class="desc">${s.description}</div>

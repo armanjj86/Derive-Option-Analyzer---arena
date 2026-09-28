@@ -1,59 +1,161 @@
 /**
  * Headless UI checks (no browser required).
  *
- *   npm install jsdom          # once, anywhere on the PATH of this folder
+ *   npm install jsdom          # once
  *   node tests/ui_checks.js    # with the app running on :5000
  *
  * Loads the real page in jsdom, stubs Chart.js, drives the analyzer end to end and
- * verifies the rendering, the payoff chart window and the settings side effects.
+ * verifies rendering, the payoff chart window, single-strategy selection and the
+ * settings side effects.
  */
-const {JSDOM, VirtualConsole}=require('jsdom');
-(async()=>{
-  let html=await (await fetch('http://127.0.0.1:5000/')).text();
-  const cdnScripts=[...html.matchAll(/<script src="([^"]+)"><\/script>/g)].map(m=>m[1]);
-  html=html.replace(/<script src="https:\/\/cdn[^>]*><\/script>/g,'');
-  const vc=new VirtualConsole(); const errs=[];
-  vc.on('jsdomError',e=>{ if(!/scrollTo|Not implemented/.test(e.message)) errs.push(e.message.slice(0,120)); });
-  vc.on('error',(...a)=>errs.push('console.error: '+a.join(' ').slice(0,120)));
-  const dom=new JSDOM(html,{url:'http://127.0.0.1:5000/',runScripts:'dangerously',pretendToBeVisual:true,virtualConsole:vc});
-  const w=dom.window;
-  w.fetch=(u,o)=>fetch(u.startsWith('http')?u:'http://127.0.0.1:5000'+u,o);
-  const charts=[];
-  class C{constructor(ctx,cfg){this.cfg=cfg;charts.push(this);}destroy(){}update(){}}
-  C.register=()=>{}; w.Chart=C;
-  w.HTMLCanvasElement.prototype.getContext=()=>new Proxy({},{get:()=>()=>{},set:()=>true});
-  w.document.dispatchEvent(new w.Event('DOMContentLoaded',{bubbles:true}));
-  const sleep=ms=>new Promise(r=>setTimeout(r,ms));
+const { JSDOM, VirtualConsole } = require("jsdom");
+
+const APP = process.env.APP_URL || "http://127.0.0.1:5000";
+const GREEN = "\x1b[32m", RED = "\x1b[31m", DIM = "\x1b[2m", RESET = "\x1b[0m";
+let failed = 0;
+
+function check(name, ok, detail = "") {
+  if (!ok) failed++;
+  console.log(`  [${ok ? GREEN + "PASS" : RED + "FAIL"}${RESET}] ${name}${detail ? `  ${DIM}${detail}${RESET}` : ""}`);
+}
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+(async () => {
+  let html = await (await fetch(APP)).text();
+  const cdn = [...html.matchAll(/<script src="(https:\/\/[^"]+)"><\/script>/g)].map(m => m[1]);
+  html = html.replace(/<script src="https:\/\/cdn[^>]*><\/script>/g, "");
+
+  const vc = new VirtualConsole();
+  const errors = [];
+  vc.on("jsdomError", e => { if (!/scrollTo|scrollIntoView|Not implemented/.test(e.message)) errors.push(e.message.slice(0, 120)); });
+  vc.on("error", (...a) => errors.push("console.error: " + a.join(" ").slice(0, 120)));
+
+  const dom = new JSDOM(html, { url: APP, runScripts: "dangerously", pretendToBeVisual: true, virtualConsole: vc });
+  const w = dom.window;
+  w.fetch = (u, o) => fetch(u.startsWith("http") ? u : APP + u, o);
+  const charts = [];
+  class ChartStub { constructor(ctx, cfg) { this.cfg = cfg; charts.push(this); } destroy() {} update() {} }
+  ChartStub.register = () => {};
+  w.Chart = ChartStub;
+  w.HTMLCanvasElement.prototype.getContext = () => new Proxy({}, { get: () => () => {}, set: () => true });
+  w.Element.prototype.scrollIntoView = function () {};
+
+  w.document.dispatchEvent(new w.Event("DOMContentLoaded", { bubbles: true }));
+  await sleep(2000);
+  const doc = w.document;
+  const chips = () => [...doc.querySelectorAll("#chips .chip")];
+  const selected = () => w.eval("[...SEL]");
+
+  console.log("\n────────────────────────────────────────────────────────────\n  UI — boot\n────────────────────────────────────────────────────────────");
+  check("only Chart.js is loaded from a CDN (annotation plugin removed)",
+    cdn.length === 1 && /chart\.js/.test(cdn[0]), cdn.join(", "));
+  check("12 strategy chips rendered", chips().length === 12, `${chips().length} chips`);
+  check("expiry list populated", doc.getElementById("f-expiry").options.length > 1);
+  check("market ticker shows a price", /\$/.test(doc.getElementById("mkt-price").textContent));
+
+  console.log("\n────────────────────────────────────────────────────────────\n  UI — single strategy selection\n────────────────────────────────────────────────────────────");
+  check("chips form a radio group", doc.getElementById("chips").getAttribute("role") === "radiogroup");
+  check("exactly one strategy selected on load", selected().length === 1, JSON.stringify(selected()));
+
+  doc.getElementById("f-expiry").value = doc.getElementById("f-expiry").options[3].value;
+  for (const id of ["long_call", "iron_condor", "bear_put_spread"]) {
+    chips().find(c => c.dataset.sid === id).dispatchEvent(new w.Event("click", { bubbles: true }));
+    await sleep(120);
+    const onChips = chips().filter(c => c.classList.contains("on")).map(c => c.dataset.sid);
+    check(`clicking "${id}" replaces the selection instead of adding to it`,
+      onChips.length === 1 && onChips[0] === id && selected().length === 1 && selected()[0] === id,
+      `highlighted=${JSON.stringify(onChips)} SEL=${JSON.stringify(selected())}`);
+  }
+  check("aria-checked / tabindex track the single selection",
+    chips().filter(c => c.getAttribute("aria-checked") === "true").length === 1 &&
+    chips().filter(c => c.tabIndex === 0).length === 1);
+
+  chips().find(c => c.dataset.sid === "bear_put_spread").dispatchEvent(new w.Event("click", { bubbles: true }));
+  await sleep(100);
+  check("re-clicking the active chip keeps it selected (never empty)",
+    selected().length === 1 && selected()[0] === "bear_put_spread");
+
+  chips().find(c => c.dataset.sid === "bear_put_spread")
+    .dispatchEvent(new w.KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true }));
+  await sleep(150);
+  check("arrow keys move the selection", selected().length === 1, JSON.stringify(selected()));
+
+  console.log("\n────────────────────────────────────────────────────────────\n  UI — results table\n────────────────────────────────────────────────────────────");
+  w.eval("selectStrategy('iron_condor'); document.getElementById('f-maxloss').value='0';");
+  await w.eval("compute()");
+  await sleep(2500);
+  const rows = doc.querySelectorAll("#results tbody tr");
+  check("results contain exactly one strategy",
+    w.eval("new Set(DATA.strategies.map(s=>s.id)).size") === 1, w.eval("JSON.stringify([...new Set(DATA.strategies.map(s=>s.id))])"));
+  check("rows rendered", rows.length > 0, `${rows.length} rows`);
+  check("long tables scroll inside the card so the header can stick",
+    rows.length <= 12 || !!doc.querySelector(".tbl-scroll.tall"));
+  check("every cell carries a data-label for the mobile card view",
+    [...rows[0].children].every(td => td.getAttribute("data-label")),
+    [...rows[0].children].map(td => td.getAttribute("data-label")).join("|"));
+  check("odometer animation is capped (DOM stays small)",
+    doc.querySelectorAll("#results .odo-digit-box").length < 1200,
+    `${doc.querySelectorAll("#results .odo-digit-box").length} digit boxes / ${doc.querySelectorAll("#results *").length} nodes`);
+
+  w.eval("selectStrategy('covered_call')");
   await sleep(1800);
-  console.log('CDN scripts left in page:', cdnScripts);
-  const exp=w.document.getElementById('f-expiry').options[3].value;
-  w.document.getElementById('f-expiry').value=exp;
-  w.eval("SEL.clear();['long_call','covered_call','iron_condor','bull_put_spread','bear_put_spread'].forEach(x=>SEL.add(x));document.getElementById('f-maxloss').value='0';");
-  await w.eval('compute()'); await sleep(2500);
-  const rows=w.document.querySelectorAll('#results tbody tr');
-  console.log('rows:',rows.length,'| tall class applied:', !!w.document.querySelector('.tbl-scroll.tall'));
-  console.log('data-labels on first row:', [...rows[0].children].map(td=>td.getAttribute('data-label')).join('|'));
-  const ids=w.eval("JSON.stringify(DATA.strategies.map(s=>s.id).filter((v,i,a)=>a.indexOf(v)===i))");
-  console.log('strategies present:', ids);
-  console.log('covered_call unlimited?', w.eval("JSON.stringify(DATA.strategies.filter(s=>s.id==='covered_call').map(s=>s.max_loss_inf))"));
-  // open modal & chart at default and at 60%
-  w.eval('openChart(0)'); await sleep(400);
-  const c1=charts[charts.length-1];
-  const p1=c1.cfg.data.labels;
-  const lo=+p1[0].replace(/[$,]/g,''), hi=+p1[p1.length-1].replace(/[$,]/g,''), spot=w.eval('DATA.spot');
-  console.log(`chart @±30%: ${((lo/spot-1)*100).toFixed(1)}% .. +${((hi/spot-1)*100).toFixed(1)}%  (label ${w.document.getElementById('range-val').textContent})`);
-  const before=w.eval('JSON.parse(localStorage.getItem("d_settings")||"{}").chartRange');
-  const rv=w.document.getElementById('chart-range'); rv.value='60'; w.eval('onRangeChange(60)'); await sleep(300);
-  const c2=charts[charts.length-1]; const p2=c2.cfg.data.labels;
-  const lo2=+p2[0].replace(/[$,]/g,''), hi2=+p2[p2.length-1].replace(/[$,]/g,'');
-  console.log(`chart @±60%: ${((lo2/spot-1)*100).toFixed(1)}% .. +${((hi2/spot-1)*100).toFixed(1)}%  (label ${w.document.getElementById('range-val').textContent})`);
-  const after=w.eval('JSON.parse(localStorage.getItem("d_settings")||"{}").chartRange');
-  console.log('saved default chartRange untouched by slider:', before===after, `(${before} -> ${after})`);
-  // fit-to-strikes
-  w.document.getElementById('fit-strikes').checked=true; w.eval("onRangeChange(60)"); await sleep(300);
-  console.log('fit-to-strikes label:', w.document.getElementById('range-val').textContent, '| slider disabled:', rv.disabled);
-  // negative max profit rendering
-  console.log('greeks table has Fee column:', /(<th>Fee<\/th>)/.test(w.document.getElementById('m-greeks').innerHTML));
-  console.log('runtime errors:', errs.length?errs:'none');
-  process.exit(0);
+  check("covered call is not reported as unlimited loss",
+    w.eval("DATA.strategies.every(s=>!s.max_loss_inf)"));
+
+  console.log("\n────────────────────────────────────────────────────────────\n  UI — payoff chart\n────────────────────────────────────────────────────────────");
+  w.eval("openChart(0)");
+  await sleep(400);
+  const spot = w.eval("DATA.spot");
+  const edges = c => {
+    const l = c.cfg.data.labels;
+    return [+l[0].replace(/[$,]/g, ""), +l[l.length - 1].replace(/[$,]/g, "")];
+  };
+  let [lo, hi] = edges(charts[charts.length - 1]);
+  check("chart window matches the ±30% label",
+    Math.abs(lo / spot - 0.7) < 0.01 && Math.abs(hi / spot - 1.3) < 0.01,
+    `${((lo / spot - 1) * 100).toFixed(1)}% .. +${((hi / spot - 1) * 100).toFixed(1)}%`);
+
+  const savedBefore = w.eval('JSON.parse(localStorage.getItem("d_settings")||"{}").chartRange');
+  doc.getElementById("chart-range").value = "60";
+  w.eval("onRangeChange(60)");
+  await sleep(300);
+  [lo, hi] = edges(charts[charts.length - 1]);
+  check("chart window follows the slider to ±60%",
+    Math.abs(lo / spot - 0.4) < 0.01 && Math.abs(hi / spot - 1.6) < 0.01,
+    `${((lo / spot - 1) * 100).toFixed(1)}% .. +${((hi / spot - 1) * 100).toFixed(1)}%`);
+  check("the slider does not overwrite the saved default range",
+    w.eval('JSON.parse(localStorage.getItem("d_settings")||"{}").chartRange') === savedBefore);
+
+  doc.getElementById("fit-strikes").checked = true;
+  w.eval("onRangeChange(60)");
+  await sleep(250);
+  check("'Fit to strikes' switches to the strike window and disables the slider",
+    doc.getElementById("range-val").textContent === "Auto" && doc.getElementById("chart-range").disabled);
+  check("modal shows a Fee column", /<th>Fee<\/th>/.test(doc.getElementById("m-greeks").innerHTML));
+
+  console.log("\n────────────────────────────────────────────────────────────\n  UI — misc\n────────────────────────────────────────────────────────────");
+  w.eval("toggleFilterCollapse(true)");
+  await sleep(100);
+  check("collapsed filter strip names the active strategy",
+    /[A-Za-z]/.test(doc.getElementById("mini-strats").textContent) &&
+    !/Strats/.test(doc.getElementById("mini-strats").textContent),
+    doc.getElementById("mini-strats").textContent);
+
+  w.eval("switchTab('strategies')");
+  await sleep(200);
+  doc.querySelectorAll(".strat-card")[5].dispatchEvent(new w.Event("click", { bubbles: true }));
+  await sleep(1500);
+  check("a reference card jumps into the analyzer with that strategy selected",
+    doc.getElementById("tab-analyzer").style.display !== "none" && selected().length === 1,
+    `SEL=${JSON.stringify(selected())}`);
+
+  w.eval("setPalette('cyberpunk');setTheme('oled');setTheme('dark');setOrbs(false);setOrbs(true);toggleZenMode();toggleZenMode();");
+  await sleep(200);
+  check("theme / palette / particle toggles run without errors",
+    doc.documentElement.getAttribute("data-palette") === "cyberpunk");
+
+  check("no runtime errors during the whole run", errors.length === 0, errors.join(" | "));
+
+  console.log(`\n${failed ? RED + failed + " failed" : GREEN + "all UI checks passed"}${RESET}\n`);
+  process.exit(failed ? 1 : 0);
 })();
