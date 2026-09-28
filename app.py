@@ -22,11 +22,21 @@ from flask import Flask, render_template, jsonify, request
 import requests as http_requests
 
 app = Flask(__name__)
+# Pick up template edits without a restart during local development.
+app.config["TEMPLATES_AUTO_RELOAD"] = os.environ.get("FLASK_DEBUG", "0").strip().lower() in ("1", "true", "yes", "on") or os.environ.get("TEMPLATES_AUTO_RELOAD", "0") == "1"
 BASE_URL = os.environ.get("DERIVE_BASE_URL", "https://api.lyra.finance").rstrip("/")
 MAX_COMBOS = 30
 # Derive options settle at 08:00 UTC on their expiry date.
 EXPIRY_HOUR_UTC = 8
 MAX_CONTRACT_SIZE = 1_000_000
+
+# ═══ DERIVE TRADING FEES — https://docs.derive.xyz/reference/fees-1 ═══
+# Option taker: $0.50 flat base fee per order + min(0.03% x notional, 12.5% x premium)
+# Spot:         no maker and no taker fees
+OPTION_TAKER_BASE_FEE = 0.50
+OPTION_TAKER_NOTIONAL_RATE = 0.0003
+OPTION_PREMIUM_FEE_CAP = 0.125
+SPOT_TAKER_FEE_RATE = 0.0
 # ═══ CACHE (expires after 5 min) ═══
 _cache = {}
 def cache_get(key, ttl=300):
@@ -350,6 +360,45 @@ def generate_combinations(strategy, spot, calls, puts):
         _combination_candidates(strategy["id"], spot, calls, puts), MAX_COMBOS))
 
 
+def option_taker_fee(spot, premium, amount):
+    """Derive option taker fee for one leg.
+
+    https://docs.derive.xyz/reference/fees-1
+        fee = $0.50 base (flat, per order) + min(0.03% x notional, 12.5% x premium)
+    with notional = spot x amount and premium = option price x amount, i.e. only the
+    variable part scales with the traded amount — the base fee does not.
+    """
+    variable = min(OPTION_TAKER_NOTIONAL_RATE * spot * amount,
+                   OPTION_PREMIUM_FEE_CAP * premium * amount)
+    return OPTION_TAKER_BASE_FEE + variable
+
+
+def spot_taker_fee(spot, amount):
+    """Derive charges no maker/taker fee on spot trades."""
+    return SPOT_TAKER_FEE_RATE * spot * amount
+
+
+def apply_trading_fees(leg_details, spot, contract_size, include_fees=True):
+    """Attach a per-leg `fee` to leg_details and return their exact total.
+
+    Leg fees are rounded to cents (what actually gets charged) and the total is the
+    sum of those rounded values, so the leg breakdown always adds up to the total
+    shown in the UI.
+    """
+    total = 0.0
+    for leg in leg_details:
+        if not include_fees:
+            leg["fee"] = 0.0
+            continue
+        if leg["opt_type"] == "underlying":
+            fee = spot_taker_fee(spot, contract_size)
+        else:
+            fee = option_taker_fee(spot, leg["premium"], contract_size)
+        leg["fee"] = round(fee, 2)
+        total += leg["fee"]
+    return round(total, 2)
+
+
 def compute_payoff(legs, spot, contract_size=1, n_points=250):
     min_k = min((l["strike"] for l in legs if l["opt_type"]!="underlying"),default=spot*0.7)
     max_k = max((l["strike"] for l in legs if l["opt_type"]!="underlying"),default=spot*1.3)
@@ -365,7 +414,9 @@ def compute_payoff(legs, spot, contract_size=1, n_points=250):
             if ot=="underlying": total+=d*(price-spot)
             elif ot=="call": total+=d*(max(price-k,0)-p)
             elif ot=="put": total+=d*(max(k-price,0)-p)
-        pnl.append(round(total*contract_size,2))
+        # 4 decimals: the client rescales this curve when the contract size
+        # changes, and 2-decimal rounding lost the sign of small payoffs.
+        pnl.append(round(total*contract_size,4))
     return prices,pnl,net_premium
 
 
@@ -513,24 +564,13 @@ def api_compute():
                         "moneyness":mn})
                 if not calc_legs: continue
 
-                total_fee = 0.0
-                for ld in leg_details:
-                    if not include_fees:
-                        ld["fee"] = 0.0
-                        continue
-                    if ld["opt_type"] == "underlying":
-                        # Spot trading fee: 0.15% (15 bps) of underlying spot value
-                        fee = 0.0015 * spot * contract_size
-                    else:
-                        # Option trading fee: $0.50 base + min(0.03% of nominal spot, 12.5% of option premium)
-                        fee_per_contract = 0.50 + min(0.0003 * spot, 0.125 * ld["premium"])
-                        fee = fee_per_contract * contract_size
-                    ld["fee"] = round(fee, 2)
-                    total_fee += fee
+                total_fee = apply_trading_fees(leg_details, spot, contract_size, include_fees)
 
-                prices,pnl,net_premium=compute_payoff(calc_legs,spot,contract_size)
-                if total_fee > 0:
-                    pnl = [round(p - total_fee, 2) for p in pnl]
+                prices, pnl_ex_fee, net_premium = compute_payoff(calc_legs, spot, contract_size)
+                # Fees are paid up front, so they shift the whole payoff curve down.
+                pnl = [round(p - total_fee, 4) for p in pnl_ex_fee] if total_fee > 0 else pnl_ex_fee
+                # Collateral is sized on the pre-fee payoff; the fee is added once, below.
+                max_loss_ex_fee = min(pnl_ex_fee) if pnl_ex_fee else 0.0
 
                 valid_pnl=[p for p in pnl if not math.isinf(p) and not math.isnan(p)]
                 if not valid_pnl: continue
@@ -552,16 +592,19 @@ def api_compute():
                 if max_profit <= 0.01 and not max_profit_inf:
                     max_profit = 0.0
 
-                # ═══ CAPITAL CALCULATION FIX ═══
-                # Include underlying cost for strategies that hold the asset
+                # ═══ CAPITAL ═══
+                # Underlying value (for strategies that hold the asset) + net debit
+                # paid, or the collateral a credit strategy must post. The pre-fee
+                # max loss is used here so the fee is not counted twice.
                 underlying_cost = spot * contract_size if has_underlying else 0
-                if net_premium > 0:  # debit
+                collateral = abs(min(max_loss_ex_fee, 0.0))
+                if net_premium > 0:      # debit — premium is paid up front
                     total_cost = underlying_cost + net_premium
-                elif net_premium < 0:  # credit — underlying cost minus credit received
-                    total_cost = underlying_cost + abs(max_loss) if max_loss != 0 else underlying_cost
-                else:  # zero premium
-                    total_cost = underlying_cost if underlying_cost > 0 else (abs(max_loss) if max_loss != 0 else 1)
-                total_cost += total_fee
+                elif net_premium < 0:    # credit — post collateral for the worst case
+                    total_cost = underlying_cost + collateral
+                else:                    # zero premium
+                    total_cost = underlying_cost or collateral or 1
+                total_cost += total_fee  # fees are cash out of the same account
 
                 # Percentage: relative to total_cost
                 if total_cost > 0:
@@ -608,7 +651,13 @@ def api_compute():
         if not results: return jsonify({"error":"No strategies could be computed."}),404
         log_event(f"Computed {total_combos} combinations across {len(strategy_ids)} strategies","ok")
         return jsonify({"spot":round(spot,2),"asset":asset,"expiry":expiry,
-            "expiry_display":expiry_display,"contract_size":contract_size,"strategies":results})
+            "expiry_display":expiry_display,"contract_size":contract_size,
+            "include_fees":include_fees,
+            "fee_model":{"option_base":OPTION_TAKER_BASE_FEE,
+                         "option_notional_rate":OPTION_TAKER_NOTIONAL_RATE,
+                         "option_premium_cap":OPTION_PREMIUM_FEE_CAP,
+                         "spot_rate":SPOT_TAKER_FEE_RATE},
+            "strategies":results})
     except http_requests.exceptions.ConnectionError: return jsonify({"error":"Cannot connect to Derive API."}),503
     except http_requests.exceptions.Timeout: return jsonify({"error":"API timeout."}),504
     except Exception as e: log_event(f"Error: {str(e)}","err"); return jsonify({"error":f"Error: {str(e)}"}),500

@@ -145,6 +145,95 @@ def section_a():
     check("valid contract_size still works", status == 200 and data.get("strategies"))
 
 
+# ══════════════════════════════════════════════════════════════════════════
+#  B — Derive fee engine
+#     reference: https://docs.derive.xyz/reference/fees-1
+#     option taker = $0.50 flat + min(0.03% x notional, 12.5% x premium)
+#     spot         = free
+# ══════════════════════════════════════════════════════════════════════════
+OPTION_BASE, NOTIONAL_RATE, PREMIUM_CAP = 0.50, 0.0003, 0.125
+
+
+def expected_option_fee(spot, premium, size):
+    return round(OPTION_BASE + min(NOTIONAL_RATE * spot * size, PREMIUM_CAP * premium * size), 2)
+
+
+def section_b():
+    section("B — Derive fee engine")
+
+    size = 0.001
+    status, data = compute(["long_call"], contract_size=size)
+    spot = data["spot"]
+    s = data["strategies"][0]
+    leg = s["legs_detail"][0]
+    want = expected_option_fee(spot, leg["premium"], size)
+    check("option leg fee matches the official Derive formula",
+          abs(leg["fee"] - want) < 0.005, f"got {leg['fee']} expected {want}")
+    check("flat $0.50 base fee is NOT scaled by contract size", leg["fee"] >= OPTION_BASE,
+          f"fee={leg['fee']} at size={size}")
+
+    status, data = compute(["protective_put"], contract_size=size)
+    s = data["strategies"][0]
+    under = [l for l in s["legs_detail"] if l["opt_type"] == "underlying"][0]
+    check("spot / underlying leg is charged no fee", under["fee"] == 0, f"fee={under['fee']}")
+
+    check("leg fees sum exactly to total_fee",
+          abs(sum(l["fee"] for l in s["legs_detail"]) - s["total_fee"]) < 1e-9,
+          f"sum={sum(l['fee'] for l in s['legs_detail'])} total={s['total_fee']}")
+
+    # B3 — a credit spread must not pay for its fee twice
+    status, with_fee = compute(["bear_call_spread"], contract_size=size, include_fees=True)
+    status, no_fee = compute(["bear_call_spread"], contract_size=size, include_fees=False)
+    a, b = with_fee["strategies"][0], no_fee["strategies"][0]
+    expected_cost = round(abs(b["max_loss"]) + a["total_fee"], 2)
+    check("credit spread capital = pre-fee collateral + fee (counted once)",
+          abs(a["total_cost"] - expected_cost) <= 0.02,
+          f"total_cost={a['total_cost']} expected≈{expected_cost} (fee={a['total_fee']})")
+    check("credit spread max loss ≈ 100% of its capital",
+          abs(a["max_loss_pct"] + 100) <= 1.0, f"max_loss_pct={a['max_loss_pct']}")
+
+    # fees must reduce profit and deepen loss, never the opposite
+    worse = all(
+        x["max_profit"] <= y["max_profit"] + 1e-6 and x["max_loss"] <= y["max_loss"] + 1e-6
+        for x, y in zip(with_fee["strategies"], no_fee["strategies"]))
+    check("enabling fees never improves P&L", worse)
+
+    status, off = compute(["long_call", "protective_put"], include_fees=False)
+    check("include_fees=false zeroes every fee",
+          all(st["total_fee"] == 0 and all(l["fee"] == 0 for l in st["legs_detail"])
+              for st in off["strategies"]))
+    check("response echoes include_fees and fee_model",
+          off.get("include_fees") is False and off.get("fee_model", {}).get("option_base") == OPTION_BASE)
+
+    # fee should be sub-linear in size (flat component), never proportional
+    status, small = compute(["long_call"], contract_size=0.001)
+    status, big = compute(["long_call"], contract_size=0.01)
+    f_small = small["strategies"][0]["total_fee"]
+    f_big = big["strategies"][0]["total_fee"]
+    check("fee grows sub-linearly with contract size (flat base present)",
+          f_big < f_small * 10 - 1e-9 and f_big > f_small,
+          f"{f_small} @0.001 vs {f_big} @0.01")
+
+    # The UI rescales results client-side when the contract size changes, using
+    # cost_new = (cost_old - fee_old) * ratio + fee_new. Verify the server agrees,
+    # otherwise the instant client-side recompute silently drifts.
+    ids = ["long_call", "protective_put", "bear_call_spread", "iron_condor"]
+    status, a10 = compute(ids, contract_size=0.001)
+    status, b10 = compute(ids, contract_size=0.01)
+    by_legs = {(s["id"], tuple(s["legs"])): s for s in b10["strategies"]}
+    worst, worst_id = 0.0, ""
+    for small in a10["strategies"]:
+        big = by_legs.get((small["id"], tuple(small["legs"])))
+        if not big:
+            continue
+        predicted = (small["total_cost"] - small["total_fee"]) * 10 + big["total_fee"]
+        err = abs(predicted - big["total_cost"]) / max(big["total_cost"], 1)
+        if err > worst:
+            worst, worst_id = err, small["id"]
+    check("client-side rescale formula reproduces server capital at 10x size",
+          worst < 0.01, f"worst drift {worst * 100:.3f}% ({worst_id})")
+
+
 def main():
     global EXPIRY
     try:
@@ -156,6 +245,7 @@ def main():
 
     print(f"\n  Target: {APP}   Expiry under test: {EXPIRY}")
     section_a()
+    section_b()
 
     passed = sum(1 for _, ok, _ in _results if ok)
     failed = len(_results) - passed

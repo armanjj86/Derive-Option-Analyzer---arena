@@ -998,7 +998,7 @@ body.zen-mode .zen-floating-bar {
             <span style="font-size:12px;font-weight:700;color:var(--text)">Enabled</span>
           </label>
         </div>
-        <div class="setting-hint">Include Derive Option Taker fees ($0.50 base + min(0.03% nom, 12.5% prem)) and Spot fees (0.15%).</div>
+        <div class="setting-hint">Derive option taker fee: $0.50 flat base per order + min(0.03% × notional, 12.5% × premium). Spot legs are free.</div>
       </div>
     </div>
   </div>
@@ -1884,26 +1884,85 @@ function rollOdometer(el, targetStr, duration = 700, cacheKey = null) {
   flushText();
 }
 
+/* ═══ DERIVE FEE MODEL (mirror of app.py — https://docs.derive.xyz/reference/fees-1) ═══
+   Option taker: $0.50 FLAT base fee per order + min(0.03% x notional, 12.5% x premium).
+   Only the variable part scales with contract size; spot legs are free.            */
+const DEFAULT_FEE_MODEL = { option_base: 0.50, option_notional_rate: 0.0003,
+                            option_premium_cap: 0.125, spot_rate: 0 };
+const round2 = v => Math.round((v + Number.EPSILON) * 100) / 100;
+
+function legTradingFee(leg, spot, cs, model) {
+  const m = model || DEFAULT_FEE_MODEL;
+  if (leg.opt_type === "underlying") return round2(m.spot_rate * spot * cs);
+  return round2(m.option_base + Math.min(m.option_notional_rate * spot * cs,
+                                         m.option_premium_cap * (leg.premium || 0) * cs));
+}
+
+/* Recompute breakevens, distances and return percentages from the (fee-adjusted)
+   payoff curve — needed because a flat fee changes them non-proportionally. */
+function recalcDerivedMetrics(s, spot) {
+  const chart = s.pnl_chart;
+  if (chart && chart.prices && chart.pnl) {
+    const prices = chart.prices, pnl = chart.pnl, bes = [];
+    for (let i = 0; i < pnl.length - 1; i++) {
+      if (pnl[i] * pnl[i + 1] < 0 && pnl[i + 1] !== pnl[i]) {
+        bes.push(round2(prices[i] + (0 - pnl[i]) * (prices[i + 1] - prices[i]) / (pnl[i + 1] - pnl[i])));
+      }
+    }
+    s.breakevens = bes;
+    chart.breakevens = bes;
+    s.distance = bes.map(be => {
+      const pct = round2((be - spot) / spot * 100);
+      return { price: be, pct: Math.abs(pct), label: pct > 0 ? "↑ to profit" : "↓ to profit" };
+    });
+  }
+  const cap = s.total_cost;
+  const clamp = v => Math.max(-999.9, Math.min(999.9, round2(v)));
+  s.max_profit_pct = (s.max_profit_inf || !(cap > 0)) ? null : clamp(s.max_profit / cap * 100);
+  if (s.max_loss_inf || !(cap > 0)) s.max_loss_pct = s.max_loss >= -0.01 ? 0.0 : null;
+  else s.max_loss_pct = s.max_loss >= -0.01 ? 0.0 : clamp(s.max_loss / cap * 100);
+}
+
 function recomputeContractSize(newCS) {
   if (!DATA || !DATA.strategies || newCS <= 0) return;
   const oldCS = DATA.contract_size || 1;
   if (oldCS === newCS) return;
   const ratio = newCS / oldCS;
+  const spot = DATA.spot;
+  const feesOn = DATA.include_fees !== undefined ? DATA.include_fees : true;
+  const model = DATA.fee_model;
 
   DATA.contract_size = newCS;
   DATA.strategies.forEach(s => {
     s.contract_size = newCS;
-    s.net_premium *= ratio;
-    s.total_cost *= ratio;
-    if (s.total_fee !== undefined) s.total_fee *= ratio;
+    const oldFee = s.total_fee || 0;
+    let newFee = 0;
     if (s.legs_detail) {
-      s.legs_detail.forEach(l => { if (l.fee !== undefined) l.fee *= ratio; });
+      s.legs_detail.forEach(l => {
+        l.fee = feesOn ? legTradingFee(l, spot, newCS, model) : 0;
+        newFee += l.fee;
+      });
     }
-    if (!s.max_profit_inf) s.max_profit *= ratio;
-    if (!s.max_loss_inf) s.max_loss *= ratio;
+    newFee = round2(newFee);
+
+    // Everything except the flat part of the fee scales linearly with size.
+    const rescale = v => (v + oldFee) * ratio - newFee;
+    s.net_premium = round2(s.net_premium * ratio);
+    s.total_cost = round2((s.total_cost - oldFee) * ratio + newFee);
     if (s.pnl_chart && s.pnl_chart.pnl) {
-      s.pnl_chart.pnl = s.pnl_chart.pnl.map(v => v * ratio);
+      s.pnl_chart.pnl = s.pnl_chart.pnl.map(v => rescale(v));
+      // Re-read the extremes from the rescaled curve: the scalars coming from the
+      // server may have been clamped to 0, which does not rescale correctly.
+      s.max_profit = round2(Math.max(...s.pnl_chart.pnl));
+      s.max_loss = round2(Math.min(...s.pnl_chart.pnl));
+    } else {
+      s.max_profit = round2(rescale(s.max_profit));
+      s.max_loss = round2(rescale(s.max_loss));
     }
+    if (s.max_loss >= -0.01) s.max_loss = 0;
+    if (s.max_profit <= 0.01 && !s.max_profit_inf) s.max_profit = 0;
+    s.total_fee = newFee;
+    recalcDerivedMetrics(s, spot);
   });
 
   updateSizeUsd();
