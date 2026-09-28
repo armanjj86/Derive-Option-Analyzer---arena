@@ -13,7 +13,6 @@ DERIVE_BASE_URL   upstream API base url               (default https://api.lyra.
 """
 
 import os
-import sys
 import math
 import itertools
 import re
@@ -704,7 +703,10 @@ def api_compute():
                     if dist_pct>0: distance_info.append({"price":be,"pct":dist_pct,"label":"↑ to profit"})
                     else: distance_info.append({"price":be,"pct":abs(dist_pct),"label":"↓ to profit"})
 
-                net_premium=options_only_premium = sum(l["direction"]*l["premium"] for l in calc_legs if l["opt_type"]!="underlying")*contract_size
+                # Net option premium only (the underlying leg is capital, not premium):
+                # positive = net debit paid, negative = net credit received.
+                net_premium = sum(l["direction"] * l["premium"] for l in calc_legs
+                                  if l["opt_type"] != "underlying") * contract_size
                 overall_mn=strategy_moneyness(leg_details,spot)
                 results.append({"id":strategy["id"],"name":f"{strategy['emoji']} {strategy['name']}",
                     "description":strategy["description"],"category":strategy["category"],"risk":strategy["risk"],

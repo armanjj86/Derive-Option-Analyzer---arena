@@ -74,7 +74,6 @@
   --select-arrow:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath d='M3 4.5L6 7.5L9 4.5' stroke='%23ffffff' stroke-width='2' fill='none' stroke-linecap='round'/%3E%3C/svg%3E");
 }
 [data-theme="contrast"] * { text-shadow: none !important; }
-[data-theme="contrast"] .glass-effect { box-shadow: 0 0 0 1px #64748b, 0 4px 20px rgba(0,0,0,0.8) !important; backdrop-filter: none !important; }
 [data-theme="oled"] .bg-orb { opacity: 0.1 !important; }
 [data-theme="contrast"] .bg-orb { display: none !important; }
 
@@ -112,7 +111,6 @@ body{font-family:var(--font-ui);background:var(--bg-solid,#0a0e17);color:var(--t
 body::before{content:'';position:fixed;inset:0;z-index:-2;background:var(--bg);pointer-events:none}
 [data-theme="light"] body::before{background:linear-gradient(135deg,#f0f2f8 0%,#ede9fe 30%,#f5f3fa 50%,#e0e7ff 70%,#f2f4fc 100%)}
 /* Glass card effect: top highlight + subtle shadow */
-.glass-effect{box-shadow:inset 0 1px 0 rgba(255,255,255,.08),0 4px 30px rgba(0,0,0,.15)}
 ::-webkit-scrollbar{width:6px;height:6px}::-webkit-scrollbar-track{background:transparent}
 ::-webkit-scrollbar-thumb{background:var(--border-l);border-radius:3px}
 
@@ -144,7 +142,6 @@ select::-ms-expand{display:none!important}
 ._glass-dd.show{display:block}
 .glass-select{position:relative}
 @keyframes ddIn{from{opacity:0;transform:translateY(-4px)}to{opacity:1;transform:translateY(0)}}
-.glass-dropdown.show{display:block}
 .glass-opt{padding:8px 12px;border-radius:6px;color:var(--text);font-size:calc(13px * var(--font-scale,1));
   cursor:pointer;transition:.15s;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
   background:rgba(17,24,39,0.90);backdrop-filter:blur(8px);margin:2px 0;
@@ -196,11 +193,6 @@ input[type="number"]::-moz-spin-button{-moz-appearance:none!important}
 .mkt-chip-val{font-weight:800;font-family:var(--font-mono);font-size:calc(13px * var(--font-scale,1));line-height:1.1;white-space:nowrap}
 .mkt-chip-val.up{color:var(--green)}.mkt-chip-val.down{color:var(--red)}.mkt-chip-val.neu{color:var(--accent-l)}
 .mkt-divider{width:1px;height:22px;background:var(--border);flex-shrink:0;margin:0 4px;opacity:.6}
-.mkt-sep{display:none}
-.mkt-item{display:none}
-.mkt-badge{font-size:10px;font-weight:700;padding:2px 6px;border-radius:4px}
-.mkt-badge.high{background:var(--red-bg);color:var(--red)}.mkt-badge.low{background:var(--green-bg);color:var(--green)}
-.mkt-badge.mid{background:var(--amber-bg);color:var(--amber)}
 .settings-btn{width:34px;height:34px;display:flex;align-items:center;justify-content:center;background:var(--bg-input);border:1px solid var(--border);border-radius:8px;color:var(--text-dim);cursor:pointer;transition:.2s;font-size:16px}
 .settings-btn:hover{border-color:var(--accent);color:var(--accent)}
 
@@ -260,7 +252,6 @@ input[type="number"]::-moz-spin-button{-moz-appearance:none!important}
 .size-row{display:flex;align-items:center;justify-content:space-between;gap:20px;margin-top:12px;padding-top:12px;border-top:1px solid var(--border);flex-wrap:wrap}
 .ctrl-group{display:flex;align-items:center;gap:10px}
 .ctrl-group label{font-size:calc(10px * var(--font-scale,1));font-weight:700;text-transform:uppercase;letter-spacing:.8px;color:var(--text-mute);margin:0;white-space:nowrap}
-.ctrl-divider{width:1px;height:22px;background:var(--border);margin:0 4px}
 .size-input{width:120px!important;padding:8px 12px!important;text-align:center;font-family:'JetBrains Mono',monospace;font-size:calc(13px * var(--font-scale,1));background:var(--bg-input);border:1px solid var(--border);border-radius:8px;color:var(--text);transition:.2s}
 .size-input:focus{outline:none;border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-bg)}
 .size-usd{font-family:'JetBrains Mono',monospace;font-size:calc(13px * var(--font-scale,1));font-weight:700;color:var(--accent-l);min-width:85px}
@@ -309,7 +300,6 @@ input[type="number"]::-moz-spin-button{-moz-appearance:none!important}
 /* TABLE */
 .rhdr{display:flex;align-items:center;justify-content:space-between;margin-bottom:12px}
 .rhdr h2{font-size:calc(15px * var(--font-scale,1));font-weight:800}
-.rhdr .cnt{display:none}
 .combo-status-pill{display:inline-flex;align-items:center;padding:6px 16px;background:var(--bg-input);backdrop-filter:blur(var(--blur));border:1px solid var(--border);border-radius:20px;font-size:calc(12px * var(--font-scale,1));font-weight:600;box-shadow:0 2px 8px rgba(0,0,0,0.15)}
 .tbl-wrap{border:1px solid var(--border);border-radius:12px;overflow:hidden;background:var(--bg-card);backdrop-filter:blur(var(--blur));box-shadow:inset 0 1px 0 rgba(255,255,255,.04)}
 .tbl-scroll{overflow-x:auto}
@@ -452,7 +442,6 @@ tbody td{padding:12px 14px;vertical-align:middle}
 .empty .ic{font-size:52px;margin-bottom:14px;opacity:.5}
 .empty .tt{font-size:calc(17px * var(--font-scale,1));font-weight:700;color:var(--text-dim);margin-bottom:6px}
 .empty .tx{font-size:calc(13px * var(--font-scale,1));max-width:380px;margin:0 auto;line-height:1.5}
-.load{display:flex;flex-direction:column;align-items:center;justify-content:center;padding:60px 24px;color:var(--text-mute)}
 .spin{width:36px;height:36px;border:3px solid var(--border);border-top-color:var(--accent);border-radius:50%;animation:sp 1s linear infinite;margin-bottom:14px}
 @keyframes sp{to{transform:rotate(360deg)}}
 /* ODOMETER / VERTICAL SLOT-MACHINE ROLLING EFFECTS */
@@ -460,8 +449,6 @@ tbody td{padding:12px 14px;vertical-align:middle}
 .odo-digit-box{display:inline-block;overflow:hidden;height:1.1em;line-height:1.1em;vertical-align:middle;position:relative}
 .odo-wheel{display:block;will-change:transform}
 .odo-wheel span{display:block;height:1.15em;line-height:1.15em;text-align:center}
-.odo-turning{text-shadow:none!important}
-.odo-turning .odo-wheel{filter:none!important}
 /* SHIMMER SKELETON LOADING */
 @keyframes shimmer{0%{background-position:-500px 0}100%{background-position:500px 0}}
 .skeleton-box{background:linear-gradient(90deg,rgba(30,41,59,0.35) 25%,rgba(51,65,85,0.7) 50%,rgba(30,41,59,0.35) 75%);background-size:1000px 100%;animation:shimmer 1.4s infinite linear;border-radius:6px;display:inline-block}
@@ -1116,6 +1103,7 @@ let SEL=new Set(["protective_put"]);
 let SPOT_PRICE=0,autoTimer=null;
 let sortState={col:null,dir:0};
 let CHART_RANGE=null;   // chart zoom for this session only (never persisted)
+const ODO_MAX_ANIMATED_ROWS=20;  // rows beyond this render their numbers as plain text
 const DEFAULT_CS={"BTC":0.001,"ETH":0.01};
 const SETTINGS={refreshInterval:0,fontScale:1,theme:"dark",chartRange:30,blur:12,orbs:true,fontFamily:"mixed",palette:"default",maxLossFilter:10,includeFees:true};
 
@@ -1285,7 +1273,13 @@ document.addEventListener("DOMContentLoaded",async()=>{
       updateSizeUsd();
     }
   });
-  document.getElementById("f-maxloss")?.addEventListener("input",function(){this.dataset.userSet="1";if(DATA)render(DATA);});
+  let _maxLossDebounce=null;
+  document.getElementById("f-maxloss")?.addEventListener("input",function(){
+    this.dataset.userSet="1";
+    // debounce: re-rendering ~200 rows on every keystroke froze the page
+    clearTimeout(_maxLossDebounce);
+    _maxLossDebounce=setTimeout(()=>{if(DATA)render(DATA);},220);
+  });
   startHealthCheck();
   startMarketTicker();
 });
@@ -1340,7 +1334,6 @@ function applySettings(){
   const orbs=document.getElementById("bg-orbs");if(orbs)orbs.classList.toggle("off",!SETTINGS.orbs);
   document.getElementById("orbs-on")?.classList.toggle("active",SETTINGS.orbs);
   document.getElementById("orbs-off")?.classList.toggle("active",!SETTINGS.orbs);
-  const pal = SETTINGS.palette || "cyberpunk";
   const theme = SETTINGS.theme || "dark";
   const pCvs = document.getElementById("cyber-particles");
   if (pCvs) {
@@ -1440,14 +1433,23 @@ function getParticleColors(pal) {
 let _cyberParticles = [];
 let _cyberRafId = null;
 let _cyberRunning = false;
+let _cyberViewport = { w: 0, h: 0 };
 
 function initCyberParticles() {
   const cvs = document.getElementById("cyber-particles");
   if (!cvs) return;
   const w = window.innerWidth;
   const h = window.innerHeight;
-  cvs.width = w;
-  cvs.height = h;
+  // Back the canvas with the device pixel ratio (capped at 2) so the glow is not
+  // blurry on HiDPI screens, then work in CSS pixels.
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  cvs.width = Math.round(w * dpr);
+  cvs.height = Math.round(h * dpr);
+  cvs.style.width = w + "px";
+  cvs.style.height = h + "px";
+  const ctx = cvs.getContext("2d");
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  _cyberViewport = { w, h };
   const count = Math.min(50, Math.floor((w * h) / 25000));
   _cyberParticles = [];
   for (let i = 0; i < count; i++) _cyberParticles.push(new CyberParticle(w, h));
@@ -1462,7 +1464,7 @@ function startCyberParticles() {
   const ctx = cvs.getContext("2d");
   function loop() {
     if (!_cyberRunning) return;
-    const w = cvs.width, h = cvs.height;
+    const w = _cyberViewport.w, h = _cyberViewport.h;
     ctx.clearRect(0, 0, w, h);
     const colors = getParticleColors(SETTINGS.palette || "default");
     for (let i = 0; i < _cyberParticles.length; i++) {
@@ -1478,11 +1480,38 @@ function stopCyberParticles() {
   _cyberRunning = false;
   if (_cyberRafId) cancelAnimationFrame(_cyberRafId);
   _cyberRafId = null;
+  // Wipe the canvas: the last frame used to stay behind the (transparent) layer.
+  const cvs = document.getElementById("cyber-particles");
+  if (cvs) {
+    const ctx = cvs.getContext("2d");
+    ctx.save();
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.clearRect(0, 0, cvs.width, cvs.height);
+    ctx.restore();
+  }
+  _cyberParticles = [];   // rebuilt for the current viewport on the next start
 }
 
+let _cyberResizeTimer = null;
 window.addEventListener("resize", () => {
-  if (_cyberRunning) initCyberParticles();
+  clearTimeout(_cyberResizeTimer);
+  // Re-init even while stopped, otherwise the canvas keeps a stale size and the
+  // particles reappear in the wrong place when they are switched back on.
+  _cyberResizeTimer = setTimeout(() => {
+    if (_cyberRunning) initCyberParticles(); else _cyberParticles = [];
+  }, 200);
 });
+
+/* Pause the animation loop when the tab is hidden (it burned GPU in the background) */
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) {
+    if (_cyberRunning) { _cyberRunning = false; if (_cyberRafId) cancelAnimationFrame(_cyberRafId); _cyberRafId = null; _cyberPausedByTab = true; }
+  } else if (_cyberPausedByTab) {
+    _cyberPausedByTab = false;
+    startCyberParticles();
+  }
+});
+let _cyberPausedByTab = false;
 
 /* ZEN / FOCUS MODE ENGINE */
 function toggleZenMode(forceState) {
@@ -1523,7 +1552,13 @@ function startAutoRefresh(){
   if(autoTimer){clearInterval(autoTimer);autoTimer=null}
   if(SETTINGS.refreshInterval<=0)return;
   autoTimer=setInterval(()=>{
-    if(document.getElementById("f-expiry").value && SEL.size>0){
+    // Refreshing while a modal is open would replace DATA under the chart the user
+    // is reading (CURR_STRAT would point at a discarded object) — only tick the
+    // market data in that case.
+    const busy = document.getElementById("overlay")?.classList.contains("on")
+              || document.getElementById("settings-overlay")?.classList.contains("on")
+              || document.getElementById("share-preview-modal")?.classList.contains("on");
+    if(!busy && document.getElementById("f-expiry").value && SEL.size>0){
       compute();
     } else {
       Promise.all([loadMarketData(), fetchSpot()]);
@@ -1548,6 +1583,19 @@ function updateMarketStreamWidth() {
     mktStreamWidth = stream1.offsetWidth;
   }
 }
+
+/* Re-measure on resize / font-scale changes, and retry while the width is still
+   unknown (e.g. measured while the header was collapsed) — otherwise the ticker
+   scrolls past its loop point and leaves an empty bar. */
+let _mktResizeTimer = null;
+window.addEventListener("resize", () => {
+  clearTimeout(_mktResizeTimer);
+  _mktResizeTimer = setTimeout(() => {
+    const before = mktStreamWidth;
+    updateMarketStreamWidth();
+    if (mktStreamWidth !== before) { mktTickerPos = 0; }
+  }, 200);
+});
 
 function triggerMarketTickerWait(seconds = 5) {
   mktTickerPos = 0;
@@ -1613,6 +1661,7 @@ function mktTickerLoop(now) {
   mktTickerLastTime = now;
 
   if (!document.hidden && !mktTickerPaused && now >= mktTickerWaitUntil) {
+    if (mktStreamWidth <= 50) updateMarketStreamWidth();
     const track = document.getElementById("mkt-track");
     if (track) {
       mktTickerPos += 30 * dt; // Constant linear speed: 30 pixels per second
@@ -1772,7 +1821,9 @@ async function compute(){
   btn.disabled=true;btn.innerHTML='<span class="spin" style="width:14px;height:14px;border-width:2px;margin:0"></span> Analyzing…';
   hideErr();
   window._lastOdoValues = {}; // Clear odometer cache so new analysis spins from zero!
-  if (!DATA) setSummaryBoxShimmer();
+  // Reveal the summary box first — it starts hidden, so the "first load" shimmer
+  // it is supposed to show never actually appeared.
+  if (!DATA) { document.getElementById("spot-box").style.display = "flex"; setSummaryBoxShimmer(); }
   box.innerHTML = getShimmerSkeletonHtml(ids.length);
   try{
     const [r] = await Promise.all([
@@ -2029,7 +2080,9 @@ function render(d){
   <th>Breakeven(s)</th><th>Distance</th><th></th></tr></thead><tbody>`;
   stratsToRender.forEach((s, idx)=>{
     const origIdx = d.strategies.indexOf(s);
-    const sKey = s.id + "_" + idx;
+    // Stable per-combo key: using the filtered row index made every number animate
+    // from an unrelated row's previous value after sorting or filtering.
+    const sKey = s.id + "#" + (s.legs_detail || []).map(l => (l.direction || "")[0] + (l.strike || "u")).join("_");
     let legsHtml='<div class="legs-col">';
     s.legs_detail.forEach(l=>{
       const isBuy=l.direction==="Buy"||l.direction==="Long";
@@ -2062,9 +2115,21 @@ function render(d){
     <td data-label="Payoff Chart"><button class="chart-btn" onclick="openChart(${origIdx})">📈 P&L</button></td></tr>`;
   });h+="</tbody></table></div></div>";document.getElementById("results").innerHTML=h;
   
+  // Only the first rows get the digit-wheel treatment: each animated number builds
+  // ~10 spans per digit, so animating every row of a 200-combo result produced tens
+  // of thousands of DOM nodes and timers and froze slower devices.
   document.querySelectorAll("#results tr.row-entry-anim").forEach((row, rowIdx) => {
+    const animate = rowIdx < ODO_MAX_ANIMATED_ROWS;
     const rowDelay = Math.min(rowIdx * 180, 3600);
     row.querySelectorAll(".odo-cell").forEach((el, cellIdx) => {
+      if (!animate) {
+        el.textContent = el.dataset.val;
+        if (el.dataset.key) {
+          if (!window._lastOdoValues) window._lastOdoValues = {};
+          window._lastOdoValues[el.dataset.key] = el.dataset.val;
+        }
+        return;
+      }
       setTimeout(() => {
         rollOdometer(el, el.dataset.val, 850, el.dataset.key);
       }, rowDelay + Math.min(cellIdx * 40, 300) + 120);
