@@ -1010,6 +1010,15 @@ body.zen-mode .zen-floating-bar {
       </div>
       <div class="setting-item" style="margin-top:16px">
         <div class="setting-label-row">
+          <span class="setting-label">Max Combinations</span>
+          <span class="setting-value" id="maxcombos-val">30</span>
+        </div>
+        <input type="range" id="set-maxcombos" class="setting-slider" min="10" max="250" step="10" value="30"
+               oninput="document.getElementById('maxcombos-val').textContent=this.value">
+        <div class="setting-hint">Strike combinations generated per strategy. Long lists stay fast: only the visible rows are kept in the DOM.</div>
+      </div>
+      <div class="setting-item" style="margin-top:16px">
+        <div class="setting-label-row">
           <span class="setting-label">Exchange Margin Type</span>
         </div>
         <select id="set-margintype" class="setting-input-num" style="width:100%;padding:8px 10px">
@@ -1132,7 +1141,7 @@ function defaultContractSize(asset){
   if(a && a.default_contract_size) return a.default_contract_size;
   return DEFAULT_CS[asset] || 0.001;
 }
-const SETTINGS={refreshInterval:0,fontScale:1,theme:"dark",chartRange:30,blur:12,orbs:true,fontFamily:"mixed",palette:"default",maxLossFilter:10,includeFees:true,feeMode:"taker",marginType:"SM"};
+const SETTINGS={refreshInterval:0,fontScale:1,theme:"dark",chartRange:30,blur:12,orbs:true,fontFamily:"mixed",palette:"default",maxLossFilter:10,includeFees:true,feeMode:"taker",marginType:"SM",maxCombos:30};
 
 /* MINI CHART SVGs — shapes preserved, dual-color via clipPath (unique IDs) */
 const MINI_CHARTS={
@@ -1351,7 +1360,7 @@ function switchTab(tab){
 /* SETTINGS */
 function loadSettings(){try{const s=JSON.parse(localStorage.getItem("d_settings"));if(s)Object.assign(SETTINGS,s);applySettings()}catch(e){applySettings()}}
 function saveSettings(){
-  const oldFees = SETTINGS.includeFees, oldMode = SETTINGS.feeMode;
+  const oldFees = SETTINGS.includeFees, oldMode = SETTINGS.feeMode, oldCombos = SETTINGS.maxCombos;
   SETTINGS.chartRange=parseInt(document.getElementById("set-chartrange").value)||30;
   SETTINGS.blur=parseInt(document.getElementById("set-blur").value)||0;
   SETTINGS.refreshInterval=parseInt(document.getElementById("set-refresh").value)||0;
@@ -1362,10 +1371,11 @@ function saveSettings(){
   SETTINGS.feeMode = fm && ["taker","maker","rfq"].includes(fm.value) ? fm.value : "taker";
   const mt = document.getElementById("set-margintype");
   SETTINGS.marginType = mt && ["SM","PM2"].includes(mt.value) ? mt.value : "SM";
+  SETTINGS.maxCombos = parseInt(document.getElementById("set-maxcombos")?.value) || 30;
   localStorage.setItem("d_settings",JSON.stringify(SETTINGS));applySettings();toggleSettings();
   if(autoTimer){clearInterval(autoTimer);autoTimer=null}
   if(SETTINGS.refreshInterval>0)startAutoRefresh();
-  if((oldFees !== SETTINGS.includeFees || oldMode !== SETTINGS.feeMode)
+  if((oldFees !== SETTINGS.includeFees || oldMode !== SETTINGS.feeMode || oldCombos !== SETTINGS.maxCombos)
       && DATA && document.getElementById("f-expiry")?.value) {
     compute();
   }
@@ -1390,6 +1400,8 @@ function applySettings(){
   if(sMode){sMode.value=SETTINGS.feeMode||"taker";}
   const sMargin=document.getElementById("set-margintype");
   if(sMargin){sMargin.value=SETTINGS.marginType||"SM";}
+  const sCombos=document.getElementById("set-maxcombos");
+  if(sCombos){sCombos.value=SETTINGS.maxCombos||30;document.getElementById("maxcombos-val").textContent=sCombos.value;}
   document.getElementById("set-blur").value=SETTINGS.blur;
   document.getElementById("blur-val").textContent=SETTINGS.blur+"px";
   document.getElementById("set-fontsize").value=SETTINGS.fontScale;
@@ -1917,7 +1929,7 @@ async function compute(){
   try{
     const [r] = await Promise.all([
       (await fetch("/api/compute",{method:"POST",headers:{"Content-Type":"application/json"},
-        body:JSON.stringify({asset,expiry,strategies:ids,contract_size:cs,include_fees:SETTINGS.includeFees!==undefined?SETTINGS.includeFees:true,fee_mode:SETTINGS.feeMode||"taker"})})).json(),
+        body:JSON.stringify({asset,expiry,strategies:ids,contract_size:cs,include_fees:SETTINGS.includeFees!==undefined?SETTINGS.includeFees:true,fee_mode:SETTINGS.feeMode||"taker",max_combos:SETTINGS.maxCombos||30})})).json(),
       loadMarketData(),
       fetchSpot()
     ]);
@@ -2206,6 +2218,7 @@ function render(d){
   <th class="${sC('maxp')}" onclick="sortTable('maxp')">Max Profit ${sI('maxp')}</th>
   <th class="${sC('maxl')}" onclick="sortTable('maxl')">Max Loss ${sI('maxl')}</th>
   <th>Breakeven(s)</th><th>Distance</th><th></th></tr></thead><tbody>`;
+  const rowsHtml = [];
   stratsToRender.forEach((s, idx)=>{
     const origIdx = d.strategies.indexOf(s);
     // Stable per-combo key: using the filtered row index made every number animate
@@ -2231,7 +2244,7 @@ function render(d){
     const bT=s.breakevens.length?s.breakevens.map((b, bi)=>`<span class="odo-cell" data-key="${sKey}_be_${bi}" data-val="$${fmt(b)}">${"$"+fmt(b)}</span>`).join(", "):" —";
     let dH=s.distance.length?s.distance.map((dd, di)=>`<div class="dist-item"><span class="dist-pct odo-cell" style="color:${dd.label.includes("profit")?"var(--green)":"var(--red)"}" data-key="${sKey}_dist_${di}" data-val="${dd.pct.toFixed(1)}%">${dd.pct.toFixed(1)}%</span><span class="dist-lb">${dd.label}</span></div>`).join(""):'<span class="dist-lb">—</span>';
     const delayMs = Math.min(idx * 180, 3600);
-    h+=`<tr class="row-entry-anim" style="--row-delay:${delayMs}ms">
+    rowsHtml.push(`<tr class="row-entry-anim" style="--row-delay:${delayMs}ms">
     <td data-label="Strategy"><div style="display:flex;align-items:center;justify-content:space-between;width:100%;flex-wrap:wrap"><div style="text-align:left"><div class="strat-nm">${s.name}</div><div class="strat-dsc">${s.description}</div></div><div>${mnO}</div></div></td>
     <td data-label="Legs">${legsHtml}</td>
     <td data-label="Net Premium" class="${pC}"><span class="odo-cell" data-key="${sKey}_prem" data-val="${pT}">${pT}</span></td>
@@ -2240,13 +2253,27 @@ function render(d){
     <td data-label="Max Loss">${mlH}</td>
     <td data-label="Breakeven(s)">${bT}</td>
     <td data-label="Distance to Profit" class="dist-col">${dH}</td>
-    <td data-label="Payoff Chart"><button class="chart-btn" onclick="openChart(${origIdx})">📈 P&L</button></td></tr>`;
-  });h+="</tbody></table></div></div>";document.getElementById("results").innerHTML=h;
-  
-  // Only the first rows get the digit-wheel treatment: each animated number builds
-  // ~10 spans per digit, so animating every row of a 200-combo result produced tens
-  // of thousands of DOM nodes and timers and froze slower devices.
-  document.querySelectorAll("#results tr.row-entry-anim").forEach((row, rowIdx) => {
+    <td data-label="Payoff Chart"><button class="chart-btn" onclick="openChart(${origIdx})">📈 P&L</button></td></tr>`);
+  });
+  h+="</tbody></table></div></div>";
+  document.getElementById("results").innerHTML=h;
+  mountRows(rowsHtml);
+}
+
+/* ═══ ROW RENDERING (windowed above VIRTUAL_ROW_THRESHOLD) ═══
+   Large result sets used to put every row in the DOM at once. Above the
+   threshold only the visible slice plus a buffer is materialised, with two
+   spacer rows holding the scroll height, so raising MAX_COMBOS stays smooth. */
+const VIRTUAL_ROW_THRESHOLD = 60;
+const VIRTUAL_ROW_BUFFER = 8;
+const FALLBACK_ROW_HEIGHT = 56;
+let _virtual = null;
+
+function animateRowNumbers(scope, offset = 0) {
+  // Only the first rows get the digit-wheel treatment: each animated number
+  // builds ~10 spans per digit, so animating hundreds of rows froze slow devices.
+  scope.querySelectorAll("tr.row-entry-anim").forEach((row, i) => {
+    const rowIdx = offset + i;
     const animate = rowIdx < ODO_MAX_ANIMATED_ROWS;
     const rowDelay = Math.min(rowIdx * 180, 3600);
     row.querySelectorAll(".odo-cell").forEach((el, cellIdx) => {
@@ -2258,11 +2285,62 @@ function render(d){
         }
         return;
       }
-      setTimeout(() => {
-        rollOdometer(el, el.dataset.val, 850, el.dataset.key);
-      }, rowDelay + Math.min(cellIdx * 40, 300) + 120);
+      setTimeout(() => rollOdometer(el, el.dataset.val, 850, el.dataset.key),
+                 rowDelay + Math.min(cellIdx * 40, 300) + 120);
     });
   });
+}
+
+function mountRows(rowsHtml) {
+  const tbody = document.querySelector("#results tbody");
+  const scroller = document.querySelector("#results .tbl-scroll");
+  if (!tbody) return;
+  _virtual = null;
+
+  if (rowsHtml.length <= VIRTUAL_ROW_THRESHOLD || !scroller) {
+    tbody.innerHTML = rowsHtml.join("");
+    animateRowNumbers(tbody);
+    return;
+  }
+
+  // measure one real row, then window the rest
+  tbody.innerHTML = rowsHtml[0];
+  const probe = tbody.querySelector("tr");
+  const measured = probe ? probe.getBoundingClientRect().height : 0;
+  const rowHeight = measured > 4 ? measured : FALLBACK_ROW_HEIGHT;
+  const viewport = scroller.clientHeight || Math.round(window.innerHeight * 0.75) || 600;
+
+  _virtual = {
+    rows: rowsHtml, tbody, scroller, rowHeight,
+    visible: Math.max(6, Math.ceil(viewport / rowHeight) + VIRTUAL_ROW_BUFFER * 2),
+    start: -1, ticking: false,
+  };
+  scroller.onscroll = () => {
+    if (!_virtual || _virtual.ticking) return;
+    _virtual.ticking = true;
+    requestAnimationFrame(() => { _virtual.ticking = false; paintVirtualWindow(); });
+  };
+  paintVirtualWindow();
+}
+
+function paintVirtualWindow() {
+  const v = _virtual;
+  if (!v) return;
+  // Clamp the window: an over-scrolled container (or a stale scrollTop) must never
+  // slice past the end of the list, which would render an empty table.
+  const maxStart = Math.max(0, v.rows.length - v.visible);
+  const first = Math.min(maxStart,
+    Math.max(0, Math.floor(v.scroller.scrollTop / v.rowHeight) - VIRTUAL_ROW_BUFFER));
+  if (first === v.start) return;
+  v.start = first;
+  const last = Math.min(v.rows.length, first + v.visible);
+  const above = first * v.rowHeight;
+  const below = Math.max(0, (v.rows.length - last) * v.rowHeight);
+  const spacer = px => `<tr class="v-spacer" aria-hidden="true"><td colspan="9" style="padding:0;border:none;height:${px}px"></td></tr>`;
+  v.tbody.innerHTML = (above ? spacer(above) : "")
+    + v.rows.slice(first, last).join("")
+    + (below ? spacer(below) : "");
+  animateRowNumbers(v.tbody, first);
 }
 
 /* Jump from the reference tab straight into the analyzer for that strategy */

@@ -125,6 +125,35 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   check("covered call is not reported as unlimited loss",
     w.eval("DATA.strategies.every(s=>!s.max_loss_inf)"));
 
+  console.log("\n────────────────────────────────────────────────────────────\n  UI — virtualised table (large result sets)\n────────────────────────────────────────────────────────────");
+  // give the scroll container a real size: jsdom reports 0 for every box
+  Object.defineProperty(w.HTMLElement.prototype, "clientHeight", { configurable: true, get() { return this.classList?.contains("tbl-scroll") ? 600 : 0; } });
+  w.eval("SETTINGS.maxCombos = 250; selectStrategy('iron_condor'); document.getElementById('f-maxloss').value='0';");
+  await w.eval("compute()");
+  await sleep(2500);
+  const total = w.eval("DATA.strategies.length");
+  const inDom = doc.querySelectorAll("#results tbody tr.row-entry-anim").length;
+  check("a large result set is windowed, not fully materialised",
+    total > 60 && inDom > 0 && inDom < total, `${inDom} of ${total} rows in the DOM`);
+  check("spacer rows hold the scroll height",
+    doc.querySelectorAll("#results tbody tr.v-spacer").length >= 1);
+  const firstBtn = doc.querySelector("#results tbody tr.row-entry-anim .chart-btn");
+  check("windowed rows keep working P&L buttons", !!firstBtn && /openChart\(\d+\)/.test(firstBtn.getAttribute("onclick")));
+
+  const scroller = doc.querySelector("#results .tbl-scroll");
+  scroller.scrollTop = 100000;
+  scroller.dispatchEvent(new w.Event("scroll"));
+  await sleep(300);
+  const lastVisible = [...doc.querySelectorAll("#results tbody tr.row-entry-anim")].pop();
+  check("scrolling to the bottom renders the last rows",
+    !!lastVisible && doc.querySelectorAll("#results tbody tr.row-entry-anim").length < total,
+    `${doc.querySelectorAll("#results tbody tr.row-entry-anim").length} rows after scrolling`);
+
+  w.eval("SETTINGS.maxCombos = 30; selectStrategy('covered_call');");
+  await sleep(1800);
+  check("small result sets render every row directly",
+    doc.querySelectorAll("#results tbody tr.v-spacer").length === 0);
+
   console.log("\n────────────────────────────────────────────────────────────\n  UI — payoff chart\n────────────────────────────────────────────────────────────");
   w.eval("openChart(0)");
   await sleep(400);

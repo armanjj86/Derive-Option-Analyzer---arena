@@ -24,7 +24,8 @@ app = Flask(__name__)
 # Pick up template edits without a restart during local development.
 app.config["TEMPLATES_AUTO_RELOAD"] = os.environ.get("FLASK_DEBUG", "0").strip().lower() in ("1", "true", "yes", "on") or os.environ.get("TEMPLATES_AUTO_RELOAD", "0") == "1"
 BASE_URL = os.environ.get("DERIVE_BASE_URL", "https://api.lyra.finance").rstrip("/")
-MAX_COMBOS = 30
+MAX_COMBOS = int(os.environ.get("MAX_COMBOS", 30))      # default combinations per strategy
+MAX_COMBOS_CEILING = 500                                 # hard upper bound per request
 # Derive options settle at 08:00 UTC on their expiry date.
 EXPIRY_HOUR_UTC = 8
 MAX_CONTRACT_SIZE = 1_000_000
@@ -355,10 +356,10 @@ def _combination_candidates(sid, spot, calls, puts):
                         yield [buy_put, sell_put, sell_call, buy_call]
 
 
-def generate_combinations(strategy, spot, calls, puts):
-    """Return at most MAX_COMBOS strike combinations for the given strategy."""
+def generate_combinations(strategy, spot, calls, puts, limit=None):
+    """Return at most `limit` (default MAX_COMBOS) strike combinations."""
     return list(itertools.islice(
-        _combination_candidates(strategy["id"], spot, calls, puts), MAX_COMBOS))
+        _combination_candidates(strategy["id"], spot, calls, puts), limit or MAX_COMBOS))
 
 
 def leg_premium(opt, direction, use_mark=False):
@@ -778,6 +779,11 @@ def api_compute():
         strategy_ids=body.get("strategies",[])
         include_fees=bool(body.get("include_fees", True))
         use_mark_prices=bool(body.get("use_mark_prices", False))
+        try:
+            max_combos = int(body.get("max_combos") or MAX_COMBOS)
+        except (TypeError, ValueError):
+            return jsonify({"error":"max_combos must be a whole number"}),400
+        max_combos = max(1, min(max_combos, MAX_COMBOS_CEILING))
         fee_mode=str(body.get("fee_mode", "taker")).lower()
         if fee_mode not in FEE_MODES:
             return jsonify({"error":f"fee_mode must be one of {', '.join(FEE_MODES)}"}),400
@@ -823,7 +829,7 @@ def api_compute():
         for strategy_id in strategy_ids:
             strategy=get_strategy_by_id(strategy_id)
             if not strategy: continue
-            combos=generate_combinations(strategy,spot,calls,puts)
+            combos=generate_combinations(strategy,spot,calls,puts,max_combos)
             strategy_combos=0
             for combo_opts in combos:
                 combo_copy=list(combo_opts); calc_legs=[]; leg_details=[]
@@ -960,6 +966,7 @@ def api_compute():
         return jsonify({"spot":round(spot,2),"asset":asset,"expiry":expiry,
             "expiry_display":expiry_display,"contract_size":contract_size,
             "include_fees":include_fees,"use_mark_prices":use_mark_prices,"fee_mode":fee_mode,
+            "max_combos":max_combos,
             "fee_model":{"option_base":OPTION_TAKER_BASE_FEE,
                          "option_notional_rate":OPTION_TAKER_NOTIONAL_RATE,
                          "option_maker_rate":OPTION_MAKER_NOTIONAL_RATE,

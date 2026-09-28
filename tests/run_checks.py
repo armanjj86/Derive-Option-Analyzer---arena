@@ -496,6 +496,40 @@ def section_f():
     check("an asset without an option chain fails cleanly", status >= 400, str(res)[:60])
 
 
+# ══════════════════════════════════════════════════════════════════════════
+#  G — configurable combination cap (feeds the virtualised table)
+# ══════════════════════════════════════════════════════════════════════════
+def section_g():
+    section("G — Combination cap")
+
+    def combos(limit=None, strategy="iron_condor"):
+        payload = {"asset": "BTC", "expiry": EXPIRY, "strategies": [strategy],
+                   "contract_size": 0.001}
+        if limit is not None:
+            payload["max_combos"] = limit
+        return post("/api/compute", payload)
+
+    status, default = combos()
+    check("default cap is still 30", len(default["strategies"]) == 30,
+          f"{len(default['strategies'])} combos")
+    check("response echoes the cap in use", default.get("max_combos") == 30)
+
+    status, more = combos(120)
+    check("a higher max_combos returns more combinations",
+          len(more["strategies"]) > 30, f"{len(more['strategies'])} combos")
+
+    status, capped = combos(100000)
+    check("max_combos is clamped to the server ceiling",
+          capped.get("max_combos") == 500 and len(capped["strategies"]) <= 500,
+          f"echoed {capped.get('max_combos')}, {len(capped['strategies'])} combos")
+
+    status, one = combos(1, "long_call")
+    check("max_combos=1 returns a single combination", len(one["strategies"]) == 1)
+
+    status, bad = combos("many")
+    check("a non-numeric max_combos is rejected", status == 400, str(bad)[:60])
+
+
 def main():
     global EXPIRY
     try:
@@ -512,6 +546,7 @@ def main():
     section_d()
     section_e()
     section_f()
+    section_g()
 
     passed = sum(1 for _, ok, _ in _results if ok)
     failed = len(_results) - passed
