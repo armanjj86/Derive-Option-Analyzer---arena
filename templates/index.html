@@ -7,7 +7,6 @@
 <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cdefs%3E%3ClinearGradient id='g' x1='0' y1='0' x2='1' y2='1'%3E%3Cstop offset='0%25' stop-color='%232563eb'/%3E%3Cstop offset='100%25' stop-color='%237c3aed'/%3E%3C/linearGradient%3E%3C/defs%3E%3Crect width='32' height='32' rx='8' fill='url(%23g)'/%3E%3Ctext x='16' y='24' font-family='Arial' font-weight='900' font-size='20' fill='white' text-anchor='middle'%3E%E2%96%B3%3C/text%3E%3C/svg%3E">
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-annotation@3.0.1/dist/chartjs-plugin-annotation.min.js"></script>
 <style>
 /* ═══ THEME ═══ */
 :root,[data-theme="dark"]{
@@ -280,8 +279,11 @@ input[type="number"]::-moz-spin-button{-moz-appearance:none!important}
   border-radius:8px;padding:10px 14px;font-size:11px;font-weight:500;white-space:nowrap;z-index:50;pointer-events:none;
   opacity:0;transition:opacity .2s ease 1.2s;box-shadow:0 4px 16px rgba(0,0,0,.3)}
 .tooltip::after{content:'';position:absolute;top:100%;left:50%;transform:translateX(-50%);border:5px solid transparent;border-top-color:var(--border-l)}
-.chip:hover .tooltip{opacity:1;transition-delay:1.2s}
-.chip:not(:hover) .tooltip{opacity:0;transition-delay:0s}
+.chip:hover .tooltip,.chip:focus-visible .tooltip{opacity:1;transition-delay:1.2s}
+.chip:not(:hover):not(:focus-visible) .tooltip{opacity:0;transition-delay:0s}
+/* touch devices have no hover: the chip carries a title attribute instead and the
+   floating tooltip is suppressed so it cannot get stuck on screen after a tap */
+@media (hover: none){.chip .tooltip{display:none}}
 .tooltip-leg{display:flex;align-items:center;gap:6px;padding:2px 0}
 .tooltip-dir{font-weight:700;font-size:10px;padding:1px 5px;border-radius:3px}
 .tooltip-dir.buy{background:var(--green-bg);color:var(--green)}
@@ -311,6 +313,10 @@ input[type="number"]::-moz-spin-button{-moz-appearance:none!important}
 .combo-status-pill{display:inline-flex;align-items:center;padding:6px 16px;background:var(--bg-input);backdrop-filter:blur(var(--blur));border:1px solid var(--border);border-radius:20px;font-size:calc(12px * var(--font-scale,1));font-weight:600;box-shadow:0 2px 8px rgba(0,0,0,0.15)}
 .tbl-wrap{border:1px solid var(--border);border-radius:12px;overflow:hidden;background:var(--bg-card);backdrop-filter:blur(var(--blur));box-shadow:inset 0 1px 0 rgba(255,255,255,.04)}
 .tbl-scroll{overflow-x:auto}
+/* With many rows the table body scrolls inside the card so the sticky header
+   (which cannot stick to the page from inside an overflow container) works. */
+.tbl-scroll.tall{max-height:75vh;overflow-y:auto}
+.tbl-scroll.tall thead th{z-index:2}
 table{width:100%;border-collapse:collapse;font-size:calc(12px * var(--font-scale,1))}
 thead th{padding:11px 14px;background:var(--bg-card2);border-bottom:1px solid var(--border);text-align:left;font-size:calc(10px * var(--font-scale,1));font-weight:700;text-transform:uppercase;letter-spacing:.7px;color:var(--text-mute);white-space:nowrap;position:sticky;top:0;cursor:pointer;user-select:none;transition:.15s}
 thead th:hover{color:var(--accent-l)}
@@ -649,7 +655,9 @@ body.zen-mode .zen-floating-bar {
   .size-row { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
   .size-row > div { width: 100%; }
   .size-row input { width: 100%; box-sizing: border-box; }
-  .dd-btn { width: 100%; box-sizing: border-box; min-height: 42px; }
+  /* the "Hide Filters" button is the third child — give it its own full-width row */
+  .size-row > .flt-collapse-btn { grid-column: 1 / -1; width: 100%; min-height: 40px; margin: 2px 0 0; }
+  .glass-select-btn { width: 100%; box-sizing: border-box; min-height: 44px; }
 
   /* 4. Results Header & Summary Box Adjustments */
   .rhdr { flex-direction: column; align-items: flex-start; gap: 10px; }
@@ -695,7 +703,9 @@ body.zen-mode .zen-floating-bar {
     margin-right: 12px;
     flex-shrink: 0;
   }
-  tbody td > *:not(::before) {
+  /* `:not(::before)` is invalid — a pseudo-element cannot be used inside :not(),
+     which made the browser drop this entire rule. */
+  tbody td > * {
     max-width: 65%;
     text-align: right;
     word-break: break-word;
@@ -1094,7 +1104,7 @@ body.zen-mode .zen-floating-bar {
         <input type="range" id="chart-range" min="1" max="100" value="30" oninput="onRangeChange(this.value)">
         <span class="range-val" id="range-val">±30%</span>
       </div>
-      <label class="center-cb"><input type="checkbox" id="center-spot" onchange="onRangeChange(document.getElementById('chart-range').value)"> Center on Spot</label>
+      <label class="center-cb" title="Use the strategy's strike range instead of a fixed ±% window around spot"><input type="checkbox" id="fit-strikes" onchange="onRangeChange(document.getElementById('chart-range').value)"> Fit to strikes</label>
     </div>
     <div id="m-greeks"></div></div>
   </div>
@@ -1105,6 +1115,7 @@ let DATA=null,CHART=null,STRATS=[],CURR_STRAT=null;
 let SEL=new Set(["protective_put"]);
 let SPOT_PRICE=0,autoTimer=null;
 let sortState={col:null,dir:0};
+let CHART_RANGE=null;   // chart zoom for this session only (never persisted)
 const DEFAULT_CS={"BTC":0.001,"ETH":0.01};
 const SETTINGS={refreshInterval:0,fontScale:1,theme:"dark",chartRange:30,blur:12,orbs:true,fontFamily:"mixed",palette:"default",maxLossFilter:10,includeFees:true};
 
@@ -1647,7 +1658,9 @@ function renderChips(){
         `${dLabel} ${l.type.charAt(0).toUpperCase()+l.type.slice(1)}`;
       return`<div class="tooltip-leg"><span class="tooltip-dir ${dCls}">${dLabel}</span><span>${desc}</span></div>`;
     }).join("");
-    return`<div class="chip ${SEL.has(s.id)?'on':''}" onclick="tog('${s.id}',this)">${s.emoji} ${s.name}<div class="tooltip">${tipLegs}</div></div>`;
+    // tabindex + title: on touch devices the hover tooltip never appears
+    const plain = s.legs.map(l => `${(l.dir === "buy" || l.dir === "hold") ? "BUY" : "SELL"} ${l.type === "underlying" ? "underlying" : l.type}`).join("  •  ");
+    return`<div class="chip ${SEL.has(s.id)?'on':''}" tabindex="0" title="${s.name} — ${plain}" onclick="tog('${s.id}',this)">${s.emoji} ${s.name}<div class="tooltip">${tipLegs}</div></div>`;
   }).join("");
 }
 function tog(id,el){
@@ -1700,11 +1713,11 @@ function getShimmerSkeletonHtml(count = 5) {
   for(let i = 0; i < rowsCount; i++) {
     rowsHtml += `
       <tr style="opacity:${1 - (i * 0.08)}">
-        <td>
+        <td data-label="Strategy">
           <div class="skeleton-box" style="width:120px;height:16px;margin-bottom:6px"></div>
           <div class="skeleton-box" style="width:170px;height:12px"></div>
         </td>
-        <td>
+        <td data-label="Legs">
           <div style="display:flex;flex-direction:column;gap:6px">
             <div style="display:flex;align-items:center;gap:6px">
               <div class="skeleton-box" style="width:36px;height:16px;border-radius:4px"></div>
@@ -1716,13 +1729,13 @@ function getShimmerSkeletonHtml(count = 5) {
             </div>
           </div>
         </td>
-        <td><div class="skeleton-box" style="width:70px;height:18px"></div></td>
-        <td><div class="skeleton-box" style="width:65px;height:18px"></div></td>
-        <td><div class="skeleton-box" style="width:80px;height:18px"></div></td>
-        <td><div class="skeleton-box" style="width:80px;height:18px"></div></td>
-        <td><div class="skeleton-box" style="width:90px;height:16px"></div></td>
-        <td><div class="skeleton-box" style="width:60px;height:16px"></div></td>
-        <td><div class="skeleton-box" style="width:75px;height:30px;border-radius:6px"></div></td>
+        <td data-label="Net Premium"><div class="skeleton-box" style="width:70px;height:18px"></div></td>
+        <td data-label="Total Cost"><div class="skeleton-box" style="width:65px;height:18px"></div></td>
+        <td data-label="Max Profit"><div class="skeleton-box" style="width:80px;height:18px"></div></td>
+        <td data-label="Max Loss"><div class="skeleton-box" style="width:80px;height:18px"></div></td>
+        <td data-label="Breakeven(s)"><div class="skeleton-box" style="width:90px;height:16px"></div></td>
+        <td data-label="Distance to Profit"><div class="skeleton-box" style="width:60px;height:16px"></div></td>
+        <td data-label="Payoff Chart"><div class="skeleton-box" style="width:75px;height:30px;border-radius:6px"></div></td>
       </tr>
     `;
   }
@@ -2007,7 +2020,7 @@ function render(d){
     return;
   }
 
-  h+=`<div class="tbl-wrap"><div class="tbl-scroll"><table><thead><tr>
+  h+=`<div class="tbl-wrap"><div class="tbl-scroll${stratsToRender.length > 12 ? " tall" : ""}"><table><thead><tr>
   <th class="${sC('strategy')}" onclick="sortTable('strategy')">Strategy ${sI('strategy')}</th><th>Contract Details</th>
   <th class="${sC('premium')}" onclick="sortTable('premium')">Net Premium ${sI('premium')}</th>
   <th class="${sC('cost')}" onclick="sortTable('cost')">Total Cost ${sI('cost')}</th>
@@ -2110,7 +2123,7 @@ function openChart(i){
       const dd=(l.direction==="Buy"||l.direction==="Long")?"Buy":"Sell";
       gh+=`<tr><td class="ln">${l.name}</td><td>${dd}</td><td>${mn}</td><td>${l.expiry_display}</td><td>${l.opt_type==='underlying'?'—':'$'+fmt(l.strike)}</td><td>${l.opt_type==='underlying'?'—':'$'+l.premium.toFixed(2)}</td>${s.total_fee > 0 ? `<td style="color:var(--red);font-weight:700">-$${l.fee !== undefined ? l.fee.toFixed(2) : '0.00'}</td>` : ''}<td>${g.delta!==undefined?g.delta.toFixed(4):'—'}</td><td>${g.gamma!==undefined?g.gamma.toFixed(6):'—'}</td><td>${g.theta!==undefined?g.theta.toFixed(4):'—'}</td><td>${g.vega!==undefined?g.vega.toFixed(4):'—'}</td><td>${g.iv!==undefined?(g.iv*100).toFixed(1)+'%':'—'}</td></tr>`;
     });gh+="</tbody></table></div>";ge.innerHTML=gh}else ge.innerHTML="";
-  {const rv=document.getElementById("chart-range");if(rv){rv.value=SETTINGS.chartRange||30;document.getElementById("range-val").textContent="±"+rv.value+"%"}}
+  {const rv=document.getElementById("chart-range");if(rv){rv.value=CHART_RANGE||SETTINGS.chartRange||30;document.getElementById("range-val").textContent="±"+rv.value+"%"}}
   drawChart(s, parseInt(document.getElementById("chart-range")?.value) || SETTINGS.chartRange || 30);
 }
 
@@ -2142,11 +2155,10 @@ function onRangeChange(val) {
   const rv = document.getElementById("chart-range");
   const rVal = parseInt(rv ? rv.value : val) || 30;
   document.getElementById("range-val").textContent = "±" + rVal + "%";
-  SETTINGS.chartRange = rVal;
-  localStorage.setItem("d_settings", JSON.stringify(SETTINGS));
-  if (CURR_STRAT) {
-    drawChart(CURR_STRAT, rVal);
-  }
+  // Session-only: dragging the slider must not silently rewrite the user's saved
+  // "Default Chart Range" setting (and must not hammer localStorage on every pixel).
+  CHART_RANGE = rVal;
+  if (CURR_STRAT) drawChart(CURR_STRAT, rVal);
 }
 
 function drawChart(s, rangePct = 30) {
@@ -2162,16 +2174,25 @@ function drawChart(s, rangePct = 30) {
     premium: l.premium
   }));
 
-  const centerSpot = document.getElementById("center-spot")?.checked;
+  // The ±range% slider now always plots exactly that window (previously the server's
+  // strike-based grid was used at 30, so the chart spanned e.g. -32%..+53% while the
+  // label said ±30%, and nudging the slider made the axis jump).
+  // "Fit to strikes" opts into the strike-based window instead.
+  const fitStrikes = document.getElementById("fit-strikes")?.checked;
+  const slider = document.getElementById("chart-range");
+  const rangeLabel = document.getElementById("range-val");
   let prices, pnl;
-
-  if (centerSpot || rangePct !== 30 || !s.pnl_chart || !s.pnl_chart.prices) {
+  if (fitStrikes && s.pnl_chart && s.pnl_chart.prices) {
+    prices = s.pnl_chart.prices;
+    pnl = s.pnl_chart.pnl;
+    if (slider) slider.disabled = true;
+    if (rangeLabel) rangeLabel.textContent = "Auto";
+  } else {
     const res = computePnL(legs, spot, rangePct, 300, cs, s.total_fee || 0);
     prices = res.prices;
     pnl = res.pnl;
-  } else {
-    prices = s.pnl_chart.prices;
-    pnl = s.pnl_chart.pnl;
+    if (slider) slider.disabled = false;
+    if (rangeLabel) rangeLabel.textContent = "±" + rangePct + "%";
   }
 
   const labels = prices.map(p => "$" + fmtInt(p));
@@ -2273,7 +2294,6 @@ function drawChart(s, rangePct = 30) {
             }
           }
         },
-        annotation: { annotations: {} }
       },
       scales: {
         x: {
@@ -2430,12 +2450,21 @@ async function exportStrategyCard() {
       ctx.fillStyle = "#94a3b8";
       ctx.fillText(label.toUpperCase(), x + w/2, y + 40);
 
-      ctx.font = "900 35px 'JetBrains Mono', monospace";
+      // Shrink to fit: two breakevens with cents are far wider than the box.
+      const fitFont = (text, weight, startPx, family, maxW) => {
+        let px = startPx;
+        ctx.font = `${weight} ${px}px ${family}`;
+        while (ctx.measureText(text).width > maxW && px > 12) {
+          px -= 1;
+          ctx.font = `${weight} ${px}px ${family}`;
+        }
+      };
+      fitFont(val, 900, 35, "'JetBrains Mono', monospace", w - 28);
       ctx.fillStyle = valColor;
       ctx.fillText(val, x + w/2, y + 86);
 
       if (subVal) {
-        ctx.font = "600 19px Inter, sans-serif";
+        fitFont(subVal, 600, 19, "Inter, sans-serif", w - 28);
         ctx.fillStyle = valColor === "#22c55e" ? "#86efac" : valColor === "#ef4444" ? "#fca5a5" : "#cbd5e1";
         ctx.fillText(subVal, x + w/2, y + 124);
       }
@@ -2454,7 +2483,8 @@ async function exportStrategyCard() {
     drawMetricBox(64, 312, 336, 148, "Max Profit", mpVL, mpPct, mpNeg ? "#ef4444" : "#22c55e");
     drawMetricBox(422, 312, 336, 148, "Max Loss", mlVL, mlPct, isNoLoss ? "#22c55e" : "#ef4444");
     drawMetricBox(780, 312, 336, 148, "Net Premium", premStr, premType, s.net_premium >= 0 ? "#ef4444" : "#22c55e");
-    drawMetricBox(1138, 312, 336, 148, "Total Capital", "$" + fmt(s.total_cost), cs + " " + asset, "#60a5fa");
+    const capSub = s.total_fee > 0 ? `${cs} ${asset}  •  incl. $${fmt(s.total_fee)} fees` : `${cs} ${asset}`;
+    drawMetricBox(1138, 312, 336, 148, "Total Capital", "$" + fmt(s.total_cost), capSub, "#60a5fa");
     drawMetricBox(1496, 312, 360, 148, "Breakeven(s)", beStr, s.distance[0] ? s.distance[0].pct.toFixed(1) + "% away" : "", "#f8fafc");
 
     // 6. Build Dedicated 1080p Offscreen Chart.js Instance
@@ -2531,8 +2561,7 @@ async function exportStrategyCard() {
         plugins: {
           legend: { display: false },
           tooltip: { enabled: false },
-          annotation: { annotations: {} }
-        },
+          },
         scales: {
           x: {
             grid: { display: false },
@@ -2571,11 +2600,12 @@ async function exportStrategyCard() {
     // 8. Output BOTH PNG (~750KB) and WebP (~220KB) for maximum social media flexibility!
     cvs.toBlob((webpBlob) => {
       cvs.toBlob((pngBlob) => {
-        let dateFormatted = "26/07/31";
+        let dateFormatted = "26-07-31";
         if (DATA && DATA.expiry) {
           const rawExp = String(DATA.expiry).replace(/[^0-9]/g, "");
           if (rawExp.length === 8) {
-            dateFormatted = `${rawExp.slice(2, 4)}/${rawExp.slice(4, 6)}/${rawExp.slice(6, 8)}`;
+            // dashes: a "/" in a download name is treated as a path separator
+            dateFormatted = `${rawExp.slice(2, 4)}-${rawExp.slice(4, 6)}-${rawExp.slice(6, 8)}`;
           }
         }
         const cleanStratName = s.name.replace(/[^a-zA-Z0-9]/g, "");
