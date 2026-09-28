@@ -1,19 +1,32 @@
 """
-Derive.xyz Options Strategy Analyzer — v5
-==========================================
-Fixes: capital calculation, terminal output, dropdowns, tooltips, strategies tab.
+Derive.xyz Options Strategy Analyzer
+====================================
+Flask backend: proxies the public Derive (Lyra) REST API and computes
+expiry payoff, Derive trading fees, breakevens and capital for 12 option
+strategies.
+
+Environment variables
+---------------------
+PORT              web server port                     (default 5000)
+FLASK_DEBUG       "1" to enable the Flask debugger    (default off)
+DERIVE_BASE_URL   upstream API base url               (default https://api.lyra.finance)
 """
 
 import os
 import sys
 import math
-from datetime import datetime
+import itertools
+import re
+from datetime import datetime, timezone
 from flask import Flask, render_template, jsonify, request
 import requests as http_requests
 
 app = Flask(__name__)
-BASE_URL = "https://api.lyra.finance"
+BASE_URL = os.environ.get("DERIVE_BASE_URL", "https://api.lyra.finance").rstrip("/")
 MAX_COMBOS = 30
+# Derive options settle at 08:00 UTC on their expiry date.
+EXPIRY_HOUR_UTC = 8
+MAX_CONTRACT_SIZE = 1_000_000
 # ═══ CACHE (expires after 5 min) ═══
 _cache = {}
 def cache_get(key, ttl=300):
@@ -47,19 +60,36 @@ class C:
     WHITE  = "\033[38;5;255m"
     GRAY   = "\033[38;5;243m"
 
+BOX_TL, BOX_TR, BOX_BL, BOX_BR = "\u2554", "\u2557", "\u255a", "\u255d"
+BOX_H, BOX_V, ARROW, DIAMOND, TICK = "\u2550", "\u2551", "\u25b8", "\u25c6", "\u2713"
+
+
 def log_startup(port):
-    print(f"""
-{C.PURPLE}{C.BOLD}  ╔═══════════════════════════════════════════════════════╗
-  ║                                                       ║
-  ║   {C.CYAN}◆  Option Strategy Analyzer  v5{C.PURPLE}                   ║
-  ║   {C.DIM}Powered by Derive.xyz{C.PURPLE}                              ║
-  ║                                                       ║
-  ║   {C.GREEN}▸ Server:{C.WHITE}  http://localhost:{port}{C.PURPLE}                 ║
-  ║   {C.GREEN}▸ Status:{C.WHITE}  Running{C.GREEN} ✓{C.PURPLE}                               ║
-  ║   {C.GREEN}▸ API:{C.WHITE}     https://api.lyra.finance{C.PURPLE}           ║
-  ║                                                       ║
-  ╚═══════════════════════════════════════════════════════╝{C.RESET}
-""")
+    """Print the boot banner, padded so the box stays aligned for any URL."""
+    inner = 55  # printable width between the box borders
+
+    def visible_len(text):
+        return len(re.sub(r"\033\[[0-9;]*m", "", text))
+
+    def row(label, value="", value_color=C.WHITE):
+        pad = " " * max(0, inner - 3 - visible_len(label) - visible_len(value))
+        return f"  {C.PURPLE}{BOX_V}{C.GREEN}   {label}{value_color}{value}{C.PURPLE}{pad}{BOX_V}"
+
+    blank = f"  {C.PURPLE}{BOX_V}{' ' * inner}{BOX_V}"
+    lines = [
+        f"  {C.PURPLE}{C.BOLD}{BOX_TL}{BOX_H * inner}{BOX_TR}",
+        blank,
+        row(f"{C.CYAN}{DIAMOND}  Option Strategy Analyzer"),
+        row(f"{C.DIM}Powered by Derive.xyz"),
+        blank,
+        row(f"{ARROW} Server:  ", f"http://localhost:{port}"),
+        row(f"{ARROW} Status:  ", f"Running {TICK}", C.GREEN),
+        row(f"{ARROW} API:     ", BASE_URL),
+        blank,
+        f"  {C.PURPLE}{BOX_BL}{BOX_H * inner}{BOX_BR}{C.RESET}",
+    ]
+    print("\n" + "\n".join(lines) + "\n")
+
 
 def log_request(method, path, status, duration_ms=None):
     status_color = C.GREEN if 200 <= status < 300 else C.RED if status >= 400 else C.AMBER
@@ -77,18 +107,34 @@ def log_event(msg, level="info"):
 #  OPTION PARSING
 # ═══════════════════════════════════════════════════════════════════════════════
 
+def utcnow():
+    """Timezone-aware current UTC time (datetime.utcnow() is deprecated)."""
+    return datetime.now(timezone.utc)
+
+
+def parse_expiry_date(date_str):
+    """'20260130' -> aware datetime at the 08:00 UTC Derive settlement time."""
+    return datetime.strptime(date_str, "%Y%m%d").replace(
+        hour=EXPIRY_HOUR_UTC, tzinfo=timezone.utc)
+
+
+def days_to_expiry(expiry_dt, now=None):
+    """Calendar days left, rounded up — an option settling in 6h is '1d', not '0d'."""
+    delta = (expiry_dt - (now or utcnow())).total_seconds()
+    return max(0, math.ceil(delta / 86400.0))
+
+
 def parse_option_name(name):
     parts = name.split("-")
     if len(parts) != 4: return None
     underlying, date_str, strike_str, opt_code = parts
     try:
-        expiry_dt = datetime.strptime(date_str, "%Y%m%d")
-        days = (expiry_dt - datetime.utcnow()).days
+        expiry_dt = parse_expiry_date(date_str)
         return {"underlying":underlying,"expiry":date_str,
                 "expiry_display":expiry_dt.strftime("%b %d"),
                 "strike":float(strike_str),
                 "type":"call" if opt_code=="C" else "put",
-                "type_code":opt_code,"days_to_expiry":max(days,0)}
+                "type_code":opt_code,"days_to_expiry":days_to_expiry(expiry_dt)}
     except (ValueError,IndexError): return None
 
 
@@ -235,51 +281,73 @@ def fetch_tickers(currency, expiry_date, instrument_type="option"):
     return tickers
 
 
-def generate_combinations(strategy, spot, calls, puts):
-    sid = strategy["id"]; combos = []
-    if sid == "long_call":
-        for opt in calls: combos.append([opt]); len(combos)>=MAX_COMBOS and combos.pop()
-    elif sid == "long_put":
-        for opt in puts: combos.append([opt]); len(combos)>=MAX_COMBOS and combos.pop()
-    elif sid in ("covered_call","protective_put"):
-        for opt in (calls if sid=="covered_call" else puts): combos.append([opt]); len(combos)>=MAX_COMBOS and combos.pop()
-    elif sid in ("bull_call_spread","bear_call_spread"):
-        for i,lo in enumerate(calls):
-            for so in calls[i+1:]:
-                if so["strike"]>lo["strike"]: combos.append([lo,so])
-                if len(combos)>=MAX_COMBOS: break
-            if len(combos)>=MAX_COMBOS: break
-    elif sid in ("bear_put_spread","bull_put_spread"):
-        for i,lo in enumerate(puts):
-            for so in puts[i+1:]:
-                if so["strike"]<lo["strike"]: combos.append([lo,so])
-                if len(combos)>=MAX_COMBOS: break
-            if len(combos)>=MAX_COMBOS: break
+def _combination_candidates(sid, spot, calls, puts):
+    """Yield candidate leg tuples for a strategy, in the order its legs are declared.
+
+    `calls` / `puts` arrive sorted by ascending strike. The order of the yielded
+    options must match the order of `STRATEGIES[...]["legs"]` (underlying legs are
+    skipped by the caller), e.g. both put spreads declare the HIGHER strike leg
+    first, so put-spread candidates are yielded as [higher, lower].
+    """
+    if sid in ("long_call", "covered_call"):
+        for opt in calls:
+            yield [opt]
+
+    elif sid in ("long_put", "protective_put"):
+        for opt in puts:
+            yield [opt]
+
+    elif sid in ("bull_call_spread", "bear_call_spread"):
+        # legs: lower-strike call first, higher-strike call second
+        for i, low in enumerate(calls):
+            for high in calls[i + 1:]:
+                if high["strike"] > low["strike"]:
+                    yield [low, high]
+
+    elif sid in ("bear_put_spread", "bull_put_spread"):
+        # legs: higher-strike put first, lower-strike put second
+        desc = sorted(puts, key=lambda x: -x["strike"])
+        for i, high in enumerate(desc):
+            for low in desc[i + 1:]:
+                if low["strike"] < high["strike"]:
+                    yield [high, low]
+
     elif sid == "collar":
-        op=[p for p in puts if p["strike"]<spot]; oc=[c for c in calls if c["strike"]>spot]
-        for pp in op:
-            for cp in oc: combos.append([pp,cp]); len(combos)>=MAX_COMBOS and combos.pop()
-            if len(combos)>=MAX_COMBOS: break
+        otm_puts = [p for p in puts if p["strike"] < spot]
+        otm_calls = [c for c in calls if c["strike"] > spot]
+        for pp in otm_puts:
+            for cc in otm_calls:
+                yield [pp, cc]
+
     elif sid == "straddle":
-        cm={c["strike"]:c for c in calls}; pm={p["strike"]:p for p in puts}
-        for k in sorted(set(cm)&set(pm)): combos.append([cm[k],pm[k]]); len(combos)>=MAX_COMBOS and combos.pop()
+        call_map = {c["strike"]: c for c in calls}
+        put_map = {p["strike"]: p for p in puts}
+        for k in sorted(set(call_map) & set(put_map)):
+            yield [call_map[k], put_map[k]]
+
     elif sid == "strangle":
-        oc=[c for c in calls if c["strike"]>=spot]; op=sorted([p for p in puts if p["strike"]<=spot],key=lambda x:-x["strike"])
-        for co in oc:
-            for po in op:
-                if co["strike"]!=po["strike"]: combos.append([co,po]); len(combos)>=MAX_COMBOS and combos.pop()
-            if len(combos)>=MAX_COMBOS: break
+        otm_calls = [c for c in calls if c["strike"] >= spot]
+        otm_puts = sorted([p for p in puts if p["strike"] <= spot], key=lambda x: -x["strike"])
+        for co in otm_calls:
+            for po in otm_puts:
+                if co["strike"] != po["strike"]:
+                    yield [co, po]
+
     elif sid == "iron_condor":
-        op=sorted([p for p in puts if p["strike"]<spot],key=lambda x:-x["strike"])
-        oc=[c for c in calls if c["strike"]>spot]
-        for i,sp in enumerate(op):
-            for bp in op[i+1:]:
-                for j,sc in enumerate(oc):
-                    for bc in oc[j+1:]: combos.append([bp,sp,sc,bc]); len(combos)>=MAX_COMBOS and combos.pop()
-                    if len(combos)>=MAX_COMBOS: break
-                if len(combos)>=MAX_COMBOS: break
-            if len(combos)>=MAX_COMBOS: break
-    return combos
+        otm_puts = sorted([p for p in puts if p["strike"] < spot], key=lambda x: -x["strike"])
+        otm_calls = [c for c in calls if c["strike"] > spot]
+        # legs: buy lower put, sell higher put, sell lower call, buy higher call
+        for i, sell_put in enumerate(otm_puts):
+            for buy_put in otm_puts[i + 1:]:
+                for j, sell_call in enumerate(otm_calls):
+                    for buy_call in otm_calls[j + 1:]:
+                        yield [buy_put, sell_put, sell_call, buy_call]
+
+
+def generate_combinations(strategy, spot, calls, puts):
+    """Return at most MAX_COMBOS strike combinations for the given strategy."""
+    return list(itertools.islice(
+        _combination_candidates(strategy["id"], spot, calls, puts), MAX_COMBOS))
 
 
 def compute_payoff(legs, spot, contract_size=1, n_points=250):
@@ -351,13 +419,13 @@ def api_expiries():
         if not instruments:
             instruments = fetch_instruments(asset,"option",False)
             cache_set(cache_key, instruments)
-        expiries,seen=[],set(); now = datetime.utcnow()
+        expiries,seen=[],set(); now = utcnow()
         for inst in instruments:
             if not inst.get("is_active", False): continue
             info = parse_option_name(inst.get("instrument_name",""))
             if info and info["underlying"].upper() == asset.upper() and info["expiry"] not in seen:
-                exp_dt = datetime.strptime(info["expiry"],"%Y%m%d"); days = (exp_dt-now).days
-                if days >= 1:
+                exp_dt = parse_expiry_date(info["expiry"]); days = days_to_expiry(exp_dt, now)
+                if exp_dt > now:
                     expiries.append({"date":info["expiry"],"display":exp_dt.strftime("%b %d, %Y")+f" ({days}d)","days":days})
                     seen.add(info["expiry"])
         expiries.sort(key=lambda x:x["date"])
@@ -369,11 +437,22 @@ def api_expiries():
 @app.route("/api/compute", methods=["POST"])
 def api_compute():
     try:
-        body=request.json; asset=body.get("asset","BTC"); expiry=body.get("expiry")
-        strategy_ids=body.get("strategies",[]); contract_size=float(body.get("contract_size",1))
+        body=request.json or {}; asset=body.get("asset","BTC"); expiry=body.get("expiry")
+        strategy_ids=body.get("strategies",[])
         include_fees=bool(body.get("include_fees", True))
         if not expiry: return jsonify({"error":"Select an expiry"}),400
         if not strategy_ids: return jsonify({"error":"Select at least one strategy"}),400
+
+        # ── Validate contract size (a zero/negative/NaN size silently produced
+        #    inverted or all-zero results before) ──
+        try:
+            contract_size = float(body.get("contract_size", 1))
+        except (TypeError, ValueError):
+            return jsonify({"error":"Contract size must be a number"}),400
+        if math.isnan(contract_size) or math.isinf(contract_size) or contract_size <= 0:
+            return jsonify({"error":"Contract size must be greater than zero"}),400
+        if contract_size > MAX_CONTRACT_SIZE:
+            return jsonify({"error":f"Contract size must be at most {MAX_CONTRACT_SIZE:,.0f}"}),400
 
         log_event(f"Computing {len(strategy_ids)} strategies for {asset} {expiry} (size={contract_size})")
         tickers=fetch_tickers(asset,expiry,"option")
@@ -572,13 +651,13 @@ def api_market():
             if not instruments:
                 instruments = fetch_instruments(asset, "option", False)
                 cache_set(cache_key, instruments)
-            now = datetime.utcnow()
+            now = utcnow()
             for inst in instruments:
                 parts = inst.get("instrument_name", "").split("-")
                 if len(parts) >= 2:
                     try:
-                        exp_dt = datetime.strptime(parts[1], "%Y%m%d")
-                        if (exp_dt - now).days >= 1:
+                        exp_dt = parse_expiry_date(parts[1])
+                        if exp_dt > now:
                             expiry = parts[1]
                             break
                     except:
@@ -679,6 +758,10 @@ def api_market():
 
 
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT",5000))
+    port = int(os.environ.get("PORT", 5000))
+    # Debug mode exposes the interactive Werkzeug console — opt-in only.
+    debug = os.environ.get("FLASK_DEBUG", "0").strip().lower() in ("1", "true", "yes", "on")
     log_startup(port)
-    app.run(host="0.0.0.0",port=port,debug=True)
+    if debug:
+        log_event("FLASK_DEBUG is enabled — do not use this on a public host", "warn")
+    app.run(host="0.0.0.0", port=port, debug=debug)
