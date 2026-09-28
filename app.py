@@ -27,6 +27,7 @@ app.config["TEMPLATES_AUTO_RELOAD"] = os.environ.get("FLASK_DEBUG", "0").strip()
 BASE_URL = os.environ.get("DERIVE_BASE_URL", "https://api.lyra.finance").rstrip("/")
 MAX_COMBOS = int(os.environ.get("MAX_COMBOS", 30))      # default combinations per strategy
 MAX_COMBOS_CEILING = 500                                 # hard upper bound per request
+MAX_COMPARE_EXPIRIES = 4                                 # expiries side by side
 # Derive options settle at 08:00 UTC on their expiry date.
 EXPIRY_HOUR_UTC = 8
 MAX_CONTRACT_SIZE = 1_000_000
@@ -909,7 +910,18 @@ def api_expiries():
 @app.route("/api/compute", methods=["POST"])
 def api_compute():
     try:
-        body=request.json or {}; asset=body.get("asset","BTC"); expiry=body.get("expiry")
+        body=request.json or {}; asset=body.get("asset","BTC")
+        # One or many expiries: `expiries` powers the comparison view, `expiry`
+        # stays for backwards compatibility.
+        raw_expiries = body.get("expiries") or ([body.get("expiry")] if body.get("expiry") else [])
+        expiries = []
+        for e in raw_expiries:
+            e = str(e or "").strip()
+            if e and e not in expiries:
+                expiries.append(e)
+        if len(expiries) > MAX_COMPARE_EXPIRIES:
+            return jsonify({"error":f"Compare at most {MAX_COMPARE_EXPIRIES} expiries at once"}),400
+        expiry = expiries[0] if expiries else None
         strategy_ids=body.get("strategies",[])
         include_fees=bool(body.get("include_fees", True))
         use_mark_prices=bool(body.get("use_mark_prices", False))
@@ -926,7 +938,7 @@ def api_compute():
         fee_mode=str(body.get("fee_mode", "taker")).lower()
         if fee_mode not in FEE_MODES:
             return jsonify({"error":f"fee_mode must be one of {', '.join(FEE_MODES)}"}),400
-        if not expiry: return jsonify({"error":"Select an expiry"}),400
+        if not expiries: return jsonify({"error":"Select an expiry"}),400
         if not strategy_ids: return jsonify({"error":"Select at least one strategy"}),400
 
         # ── Validate contract size (a zero/negative/NaN size silently produced
@@ -940,211 +952,250 @@ def api_compute():
         if contract_size > MAX_CONTRACT_SIZE:
             return jsonify({"error":f"Contract size must be at most {MAX_CONTRACT_SIZE:,.0f}"}),400
 
-        log_event(f"Computing {len(strategy_ids)} strategies for {asset} {expiry} (size={contract_size})")
-        tickers=fetch_tickers(asset,expiry,"option")
-        if not tickers: return jsonify({"error":f"No options for {asset} expiring {expiry}"}),404
+        def analyse_expiry(expiry):
+            """Build every requested strategy for ONE expiry.
 
-        # Exact time to expiry (Derive settles at 08:00 UTC) — used by the
-        # probability-of-profit model. Floored at one hour so an expiry that is
-        # minutes away cannot blow up the maths.
-        t_years = max((parse_expiry_date(expiry) - utcnow()).total_seconds(), 3600.0) / (365.0 * 86400.0)
+            Returns (payload, error). Split out so the comparison view can run the
+            same maths across several expiries in a single request instead of
+            making the browser fire one call per expiry.
+            """
+            log_event(f"Computing {len(strategy_ids)} strategies for {asset} {expiry} (size={contract_size})")
+            tickers=fetch_tickers(asset,expiry,"option")
+            if not tickers: return None, (jsonify({"error":f"No options for {asset} expiring {expiry}"}),404)
 
-        calls,puts=[],[]; spot=0.0; expiry_display=""
-        for t in tickers:
-            info=parse_option_name(t["instrument_name"])
-            if not info or info["underlying"].upper() != asset.upper(): continue
-            if not expiry_display: expiry_display=parse_expiry_date(info["expiry"]).strftime("%b %d, %Y")
-            best_ask=float(t.get("best_ask_price",0)); best_bid=float(t.get("best_bid_price",0))
-            mark_price=float(t.get("mark_price",0)); idx_price=float(t.get("index_price",0))
-            if idx_price>0: spot=idx_price
-            op=t.get("option_pricing") or {}; st=t.get("stats") or {}
-            greeks={"delta":float(op.get("delta",0)),"gamma":float(op.get("gamma",0)),
-                "theta":float(op.get("theta",0)),"vega":float(op.get("vega",0)),
-                "rho":float(op.get("rho",0)),"iv":float(op.get("iv",0))}
-            entry={"name":t["instrument_name"],"strike":info["strike"],"type":info["type"],
-                "expiry_display":info["expiry_display"],"days_to_expiry":info["days_to_expiry"],
-                "best_ask":best_ask,"best_bid":best_bid,"mark_price":mark_price,
-                "greeks":greeks,"open_interest":float(st.get("oi",0)),"volume":float(st.get("v",0))}
-            entry["liquidity"]=leg_liquidity(entry)
-            (calls if info["type"]=="call" else puts).append(entry)
-        calls.sort(key=lambda x:x["strike"]); puts.sort(key=lambda x:x["strike"])
-        if spot<=0: return jsonify({"error":"Could not determine spot price"}),500
+            # Exact time to expiry (Derive settles at 08:00 UTC) — used by the
+            # probability-of-profit model. Floored at one hour so an expiry that is
+            # minutes away cannot blow up the maths.
+            t_years = max((parse_expiry_date(expiry) - utcnow()).total_seconds(), 3600.0) / (365.0 * 86400.0)
 
-        # ═══ LIQUIDITY FILTER ═══
-        # Applied to the chain *before* combinations are built, so the 30 results
-        # are 30 tradable ones instead of being padded with untradable strikes.
-        chain_total = len(calls) + len(puts)
+            calls,puts=[],[]; spot=0.0; expiry_display=""
+            for t in tickers:
+                info=parse_option_name(t["instrument_name"])
+                if not info or info["underlying"].upper() != asset.upper(): continue
+                if not expiry_display: expiry_display=parse_expiry_date(info["expiry"]).strftime("%b %d, %Y")
+                best_ask=float(t.get("best_ask_price",0)); best_bid=float(t.get("best_bid_price",0))
+                mark_price=float(t.get("mark_price",0)); idx_price=float(t.get("index_price",0))
+                if idx_price>0: spot=idx_price
+                op=t.get("option_pricing") or {}; st=t.get("stats") or {}
+                greeks={"delta":float(op.get("delta",0)),"gamma":float(op.get("gamma",0)),
+                    "theta":float(op.get("theta",0)),"vega":float(op.get("vega",0)),
+                    "rho":float(op.get("rho",0)),"iv":float(op.get("iv",0))}
+                entry={"name":t["instrument_name"],"strike":info["strike"],"type":info["type"],
+                    "expiry_display":info["expiry_display"],"days_to_expiry":info["days_to_expiry"],
+                    "best_ask":best_ask,"best_bid":best_bid,"mark_price":mark_price,
+                    "greeks":greeks,"open_interest":float(st.get("oi",0)),"volume":float(st.get("v",0))}
+                entry["liquidity"]=leg_liquidity(entry)
+                (calls if info["type"]=="call" else puts).append(entry)
+            calls.sort(key=lambda x:x["strike"]); puts.sort(key=lambda x:x["strike"])
+            if spot<=0: return None, (jsonify({"error":"Could not determine spot price"}),500)
 
-        def tradable(entry):
-            liq = entry["liquidity"]
-            if min_open_interest > 0 and liq["open_interest"] < min_open_interest:
-                return False
-            if max_spread_pct > 0:
-                if not liq["quoted"] or liq["spread_pct"] is None:
+            # ═══ LIQUIDITY FILTER ═══
+            # Applied to the chain *before* combinations are built, so the 30 results
+            # are 30 tradable ones instead of being padded with untradable strikes.
+            chain_total = len(calls) + len(puts)
+
+            def tradable(entry):
+                liq = entry["liquidity"]
+                if min_open_interest > 0 and liq["open_interest"] < min_open_interest:
                     return False
-                if liq["spread_pct"] > max_spread_pct:
-                    return False
-            return True
+                if max_spread_pct > 0:
+                    if not liq["quoted"] or liq["spread_pct"] is None:
+                        return False
+                    if liq["spread_pct"] > max_spread_pct:
+                        return False
+                return True
 
-        if max_spread_pct > 0 or min_open_interest > 0:
-            calls = [c for c in calls if tradable(c)]
-            puts = [p for p in puts if tradable(p)]
-            if not calls and not puts:
-                return jsonify({"error":"No contracts pass the liquidity filter — "
-                                        "relax the max spread or minimum open interest"}),404
-        chain_kept = len(calls) + len(puts)
+            if max_spread_pct > 0 or min_open_interest > 0:
+                calls = [c for c in calls if tradable(c)]
+                puts = [p for p in puts if tradable(p)]
+                if not calls and not puts:
+                    return None, (jsonify({"error":"No contracts pass the liquidity filter — "
+                                                   "relax the max spread or minimum open interest"}),404)
+            chain_kept = len(calls) + len(puts)
 
-        results=[]; total_combos=0
-        for strategy_id in strategy_ids:
-            strategy=get_strategy_by_id(strategy_id)
-            if not strategy: continue
-            combos=generate_combinations(strategy,spot,calls,puts,max_combos)
-            strategy_combos=0
-            for combo_opts in combos:
-                combo_copy=list(combo_opts); calc_legs=[]; leg_details=[]
-                has_underlying=False
-                for leg_def in strategy["legs"]:
-                    if leg_def["type"]=="underlying":
-                        has_underlying=True
-                        calc_legs.append({"direction":1,"opt_type":"underlying","strike":spot,"premium":0})
-                        leg_details.append({"name":f"{asset} Spot","direction":"Long","opt_type":"underlying",
-                            "strike":spot,"expiry_display":"—","premium":0,"mark_price":0,
-                            "best_ask":0,"best_bid":0,
-                            "greeks":{"delta":1,"gamma":0,"theta":0,"vega":0,"iv":0},
-                            "open_interest":0,"volume":0,
-                            "liquidity":{"spread_pct":0.0,"open_interest":0,"volume":0,"quoted":True},
-                            "description":f"Long {asset}","moneyness":"ATM"})
-                        continue
-                    opt=combo_copy.pop(0) if combo_copy else None
-                    if not opt: break
-                    direction=1 if leg_def["dir"] in ("buy","hold") else -1
-                    dir_label="Buy" if direction>0 else "Sell"
-                    premium, premium_source = leg_premium(opt, direction, use_mark_prices)
-                    mn=moneyness(opt["strike"],spot,opt["type"])
-                    calc_legs.append({"direction":direction,"opt_type":opt["type"],"strike":opt["strike"],"premium":premium})
-                    s_val=int(opt["strike"]) if opt["strike"]==int(opt["strike"]) else opt["strike"]
-                    leg_details.append({"name":opt["name"],"direction":dir_label,"opt_type":opt["type"],
-                        "strike":opt["strike"],"expiry_display":opt["expiry_display"],"premium":premium,
-                        "premium_source":premium_source,
-                        "mark_price":opt["mark_price"],"best_ask":opt["best_ask"],"best_bid":opt["best_bid"],
-                        "greeks":opt["greeks"],"open_interest":opt["open_interest"],"volume":opt["volume"],
-                        "liquidity":opt.get("liquidity") or leg_liquidity(opt),
-                        "description":f"{dir_label} {asset} {s_val} {'Call' if opt['type']=='call' else 'Put'} ({opt['expiry_display']})",
-                        "moneyness":mn})
-                if not calc_legs: continue
+            results=[]; total_combos=0
+            for strategy_id in strategy_ids:
+                strategy=get_strategy_by_id(strategy_id)
+                if not strategy: continue
+                combos=generate_combinations(strategy,spot,calls,puts,max_combos)
+                strategy_combos=0
+                for combo_opts in combos:
+                    combo_copy=list(combo_opts); calc_legs=[]; leg_details=[]
+                    has_underlying=False
+                    for leg_def in strategy["legs"]:
+                        if leg_def["type"]=="underlying":
+                            has_underlying=True
+                            calc_legs.append({"direction":1,"opt_type":"underlying","strike":spot,"premium":0})
+                            leg_details.append({"name":f"{asset} Spot","direction":"Long","opt_type":"underlying",
+                                "strike":spot,"expiry_display":"—","premium":0,"mark_price":0,
+                                "best_ask":0,"best_bid":0,
+                                "greeks":{"delta":1,"gamma":0,"theta":0,"vega":0,"iv":0},
+                                "open_interest":0,"volume":0,
+                                "liquidity":{"spread_pct":0.0,"open_interest":0,"volume":0,"quoted":True},
+                                "description":f"Long {asset}","moneyness":"ATM"})
+                            continue
+                        opt=combo_copy.pop(0) if combo_copy else None
+                        if not opt: break
+                        direction=1 if leg_def["dir"] in ("buy","hold") else -1
+                        dir_label="Buy" if direction>0 else "Sell"
+                        premium, premium_source = leg_premium(opt, direction, use_mark_prices)
+                        mn=moneyness(opt["strike"],spot,opt["type"])
+                        calc_legs.append({"direction":direction,"opt_type":opt["type"],"strike":opt["strike"],"premium":premium})
+                        s_val=int(opt["strike"]) if opt["strike"]==int(opt["strike"]) else opt["strike"]
+                        leg_details.append({"name":opt["name"],"direction":dir_label,"opt_type":opt["type"],
+                            "strike":opt["strike"],"expiry_display":opt["expiry_display"],"premium":premium,
+                            "premium_source":premium_source,
+                            "mark_price":opt["mark_price"],"best_ask":opt["best_ask"],"best_bid":opt["best_bid"],
+                            "greeks":opt["greeks"],"open_interest":opt["open_interest"],"volume":opt["volume"],
+                            "liquidity":opt.get("liquidity") or leg_liquidity(opt),
+                            "description":f"{dir_label} {asset} {s_val} {'Call' if opt['type']=='call' else 'Put'} ({opt['expiry_display']})",
+                            "moneyness":mn})
+                    if not calc_legs: continue
 
-                total_fee = apply_trading_fees(leg_details, spot, contract_size,
-                                               include_fees, fee_mode)
+                    total_fee = apply_trading_fees(leg_details, spot, contract_size,
+                                                   include_fees, fee_mode)
 
-                prices, pnl_ex_fee, net_premium = compute_payoff(calc_legs, spot, contract_size)
-                # Fees are paid up front, so they shift the whole payoff curve down.
-                pnl = [round(p - total_fee, 4) for p in pnl_ex_fee] if total_fee > 0 else pnl_ex_fee
-                # Collateral is sized on the pre-fee payoff; the fee is added once, below.
-                max_loss_ex_fee = min(pnl_ex_fee) if pnl_ex_fee else 0.0
+                    prices, pnl_ex_fee, net_premium = compute_payoff(calc_legs, spot, contract_size)
+                    # Fees are paid up front, so they shift the whole payoff curve down.
+                    pnl = [round(p - total_fee, 4) for p in pnl_ex_fee] if total_fee > 0 else pnl_ex_fee
+                    # Collateral is sized on the pre-fee payoff; the fee is added once, below.
+                    max_loss_ex_fee = min(pnl_ex_fee) if pnl_ex_fee else 0.0
 
-                if not pnl: continue
+                    if not pnl: continue
 
-                # ═══ EXACT EXTREMES ═══
-                # The expiry payoff is piecewise linear, so its extremes sit either at
-                # a strike, at S=0, or out at infinity. Evaluating those points exactly
-                # replaces the old grid scan + magnitude heuristics, which wrongly called
-                # a covered call's (bounded) downside "unlimited".
-                extremes = payoff_extremes(calc_legs, spot, contract_size, total_fee)
-                max_profit = extremes["max_profit"]
-                max_loss = extremes["max_loss"]
-                max_profit_price = extremes["max_profit_price"]
-                max_loss_price = extremes["max_loss_price"]
-                max_profit_inf = extremes["max_profit_inf"]
-                max_loss_inf = extremes["max_loss_inf"]
+                    # ═══ EXACT EXTREMES ═══
+                    # The expiry payoff is piecewise linear, so its extremes sit either at
+                    # a strike, at S=0, or out at infinity. Evaluating those points exactly
+                    # replaces the old grid scan + magnitude heuristics, which wrongly called
+                    # a covered call's (bounded) downside "unlimited".
+                    extremes = payoff_extremes(calc_legs, spot, contract_size, total_fee)
+                    max_profit = extremes["max_profit"]
+                    max_loss = extremes["max_loss"]
+                    max_profit_price = extremes["max_profit_price"]
+                    max_loss_price = extremes["max_loss_price"]
+                    max_profit_inf = extremes["max_profit_inf"]
+                    max_loss_inf = extremes["max_loss_inf"]
 
-                # Values below this are indistinguishable from zero for this trade size
-                # (an absolute $0.01 cut-off hid real P&L at small contract sizes).
-                zero_eps = max(1e-6, spot * contract_size * 1e-5)
-                # Only snap values that are *within* epsilon of zero. A genuinely
-                # negative max profit (a combo that can never pay off after crossing
-                # the spread) must stay negative instead of being shown as break-even.
-                if not max_loss_inf and abs(max_loss) <= zero_eps:
-                    max_loss = 0.0
-                if not max_profit_inf and abs(max_profit) <= zero_eps:
-                    max_profit = 0.0
+                    # Values below this are indistinguishable from zero for this trade size
+                    # (an absolute $0.01 cut-off hid real P&L at small contract sizes).
+                    zero_eps = max(1e-6, spot * contract_size * 1e-5)
+                    # Only snap values that are *within* epsilon of zero. A genuinely
+                    # negative max profit (a combo that can never pay off after crossing
+                    # the spread) must stay negative instead of being shown as break-even.
+                    if not max_loss_inf and abs(max_loss) <= zero_eps:
+                        max_loss = 0.0
+                    if not max_profit_inf and abs(max_profit) <= zero_eps:
+                        max_profit = 0.0
 
-                # ═══ CAPITAL ═══
-                # Underlying value (for strategies that hold the asset) + net debit
-                # paid, or the collateral a credit strategy must post. The pre-fee
-                # max loss is used here so the fee is not counted twice.
-                underlying_cost = spot * contract_size if has_underlying else 0
-                collateral = abs(min(max_loss_ex_fee, 0.0))
-                if extremes["max_loss_inf"]:
-                    collateral = abs(min(min(pnl_ex_fee), 0.0))
-                if net_premium > 0:      # debit — premium is paid up front
-                    total_cost = underlying_cost + net_premium
-                elif net_premium < 0:    # credit — post collateral for the worst case
-                    total_cost = underlying_cost + collateral
-                else:                    # zero premium
-                    total_cost = underlying_cost or collateral or 1
-                total_cost += total_fee  # fees are cash out of the same account
+                    # ═══ CAPITAL ═══
+                    # Underlying value (for strategies that hold the asset) + net debit
+                    # paid, or the collateral a credit strategy must post. The pre-fee
+                    # max loss is used here so the fee is not counted twice.
+                    underlying_cost = spot * contract_size if has_underlying else 0
+                    collateral = abs(min(max_loss_ex_fee, 0.0))
+                    if extremes["max_loss_inf"]:
+                        collateral = abs(min(min(pnl_ex_fee), 0.0))
+                    if net_premium > 0:      # debit — premium is paid up front
+                        total_cost = underlying_cost + net_premium
+                    elif net_premium < 0:    # credit — post collateral for the worst case
+                        total_cost = underlying_cost + collateral
+                    else:                    # zero premium
+                        total_cost = underlying_cost or collateral or 1
+                    total_cost += total_fee  # fees are cash out of the same account
 
-                # Percentage: relative to total_cost
-                if total_cost > 0:
-                    if max_profit_inf: max_profit_pct = None
+                    # Percentage: relative to total_cost
+                    if total_cost > 0:
+                        if max_profit_inf: max_profit_pct = None
+                        else:
+                            raw = max_profit / total_cost * 100
+                            max_profit_pct = round(min(raw,999.9),2) if abs(raw)>500 else round(raw,2)
+                        if max_loss_inf: max_loss_pct = None
+                        elif max_loss >= -zero_eps: max_loss_pct = 0.0
+                        else:
+                            raw = max_loss / total_cost * 100
+                            max_loss_pct = round(max(raw,-999.9),2) if abs(raw)>500 else round(raw,2)
                     else:
-                        raw = max_profit / total_cost * 100
-                        max_profit_pct = round(min(raw,999.9),2) if abs(raw)>500 else round(raw,2)
-                    if max_loss_inf: max_loss_pct = None
-                    elif max_loss >= -zero_eps: max_loss_pct = 0.0
-                    else:
-                        raw = max_loss / total_cost * 100
-                        max_loss_pct = round(max(raw,-999.9),2) if abs(raw)>500 else round(raw,2)
-                else:
-                    max_profit_pct=None; max_loss_pct=0.0 if max_loss >= -zero_eps else None
+                        max_profit_pct=None; max_loss_pct=0.0 if max_loss >= -zero_eps else None
 
-                # Breakevens
-                breakevens=[]
-                for i in range(len(pnl)-1):
-                    if pnl[i]*pnl[i+1]<0:
-                        x0,x1=prices[i],prices[i+1]; y0,y1=pnl[i],pnl[i+1]
-                        if y1!=y0: breakevens.append(round(x0+(0-y0)*(x1-x0)/(y1-y0),2))
-                distance_info=[]
-                for be in breakevens:
-                    dist_pct=round((be-spot)/spot*100,2)
-                    if dist_pct>0: distance_info.append({"price":be,"pct":dist_pct,"label":"↑ to profit"})
-                    else: distance_info.append({"price":be,"pct":abs(dist_pct),"label":"↓ to profit"})
+                    # Breakevens
+                    breakevens=[]
+                    for i in range(len(pnl)-1):
+                        if pnl[i]*pnl[i+1]<0:
+                            x0,x1=prices[i],prices[i+1]; y0,y1=pnl[i],pnl[i+1]
+                            if y1!=y0: breakevens.append(round(x0+(0-y0)*(x1-x0)/(y1-y0),2))
+                    distance_info=[]
+                    for be in breakevens:
+                        dist_pct=round((be-spot)/spot*100,2)
+                        if dist_pct>0: distance_info.append({"price":be,"pct":dist_pct,"label":"↑ to profit"})
+                        else: distance_info.append({"price":be,"pct":abs(dist_pct),"label":"↓ to profit"})
 
-                # Net option premium only (the underlying leg is capital, not premium):
-                # positive = net debit paid, negative = net credit received.
-                net_premium = sum(l["direction"] * l["premium"] for l in calc_legs
-                                  if l["opt_type"] != "underlying") * contract_size
-                # ═══ PROBABILITY OF PROFIT ═══
-                iv_avg = position_iv(leg_details)
-                pop = probability_of_profit(calc_legs, spot, contract_size, total_fee,
-                                            breakevens, iv_avg, t_years)
+                    # Net option premium only (the underlying leg is capital, not premium):
+                    # positive = net debit paid, negative = net credit received.
+                    net_premium = sum(l["direction"] * l["premium"] for l in calc_legs
+                                      if l["opt_type"] != "underlying") * contract_size
+                    # ═══ PROBABILITY OF PROFIT ═══
+                    iv_avg = position_iv(leg_details)
+                    pop = probability_of_profit(calc_legs, spot, contract_size, total_fee,
+                                                breakevens, iv_avg, t_years)
 
-                overall_mn=strategy_moneyness(leg_details,spot)
-                results.append({"id":strategy["id"],"name":f"{strategy['emoji']} {strategy['name']}",
-                    "description":strategy["description"],"category":strategy["category"],"risk":strategy["risk"],
-                    "moneyness":overall_mn,"legs":[ld["description"] for ld in leg_details],
-                    "legs_detail":leg_details,"contract_size":contract_size,
-                    "net_premium":round(net_premium,2),"total_cost":round(total_cost,2),"total_fee":round(total_fee,2),
-                    # An unbounded extreme has no meaningful number — send null so no
-                    # consumer accidentally treats the probe value as the real maximum.
-                    "max_profit":None if max_profit_inf else round(max_profit,2),
-                    "max_profit_pct":max_profit_pct,
-                    "max_profit_inf":max_profit_inf,
-                    "max_loss":None if max_loss_inf else round(max_loss,2),
-                    "max_loss_pct":max_loss_pct,"max_loss_inf":max_loss_inf,
-                    "max_profit_price":round(max_profit_price,2),"max_loss_price":round(max_loss_price,2),
-                    "breakevens":breakevens,"distance":distance_info,
-                    "liquidity":strategy_liquidity(leg_details),
-                    "pop":None if pop is None else round(pop*100,1),
-                    "iv_avg":None if iv_avg is None else round(iv_avg,4),
-                    "t_years":round(t_years,6),
-                    "pnl_chart":{"prices":[round(p,2) for p in prices],"pnl":pnl,"spot":round(spot,2),"breakevens":breakevens}})
-                strategy_combos+=1
-            total_combos+=strategy_combos
+                    overall_mn=strategy_moneyness(leg_details,spot)
+                    results.append({"id":strategy["id"],"name":f"{strategy['emoji']} {strategy['name']}",
+                        "description":strategy["description"],"category":strategy["category"],"risk":strategy["risk"],
+                        "moneyness":overall_mn,"legs":[ld["description"] for ld in leg_details],
+                        "legs_detail":leg_details,"contract_size":contract_size,
+                        "net_premium":round(net_premium,2),"total_cost":round(total_cost,2),"total_fee":round(total_fee,2),
+                        # An unbounded extreme has no meaningful number — send null so no
+                        # consumer accidentally treats the probe value as the real maximum.
+                        "max_profit":None if max_profit_inf else round(max_profit,2),
+                        "max_profit_pct":max_profit_pct,
+                        "max_profit_inf":max_profit_inf,
+                        "max_loss":None if max_loss_inf else round(max_loss,2),
+                        "max_loss_pct":max_loss_pct,"max_loss_inf":max_loss_inf,
+                        "max_profit_price":round(max_profit_price,2),"max_loss_price":round(max_loss_price,2),
+                        "breakevens":breakevens,"distance":distance_info,
+                        "liquidity":strategy_liquidity(leg_details),
+                        "pop":None if pop is None else round(pop*100,1),
+                        "iv_avg":None if iv_avg is None else round(iv_avg,4),
+                        "t_years":round(t_years,6),
+                        "pnl_chart":{"prices":[round(p,2) for p in prices],"pnl":pnl,"spot":round(spot,2),"breakevens":breakevens}})
+                    strategy_combos+=1
+                total_combos+=strategy_combos
+
+
+            return {"results":results,"spot":spot,"expiry":expiry,
+                    "expiry_display":expiry_display,"total_combos":total_combos,
+                    "chain_total":chain_total,"chain_kept":chain_kept,
+                    "days":days_to_expiry(parse_expiry_date(expiry))}, None
+
+        results, spot, expiry_display = [], 0.0, ""
+        chain_total = chain_kept = 0
+        total_combos = 0
+        expiry_meta = []
+        for idx, exp in enumerate(expiries):
+            payload, err = analyse_expiry(exp)
+            if err:
+                return err
+            if not payload["results"]:
+                continue
+            spot = payload["spot"] or spot
+            chain_total += payload["chain_total"]; chain_kept += payload["chain_kept"]
+            total_combos += payload["total_combos"]
+            if not expiry_display:
+                expiry_display = payload["expiry_display"]
+            expiry_meta.append({"date":exp,"display":payload["expiry_display"],
+                                "days":payload["days"],"color_index":idx,
+                                "combos":len(payload["results"])})
+            for r in payload["results"]:
+                r["expiry"] = exp
+                r["expiry_display"] = payload["expiry_display"]
+                r["expiry_days"] = payload["days"]
+                r["expiry_index"] = idx
+                results.append(r)
 
         if not results: return jsonify({"error":"No strategies could be computed."}),404
         log_event(f"Computed {total_combos} combinations across {len(strategy_ids)} strategies","ok")
         return jsonify({"spot":round(spot,2),"asset":asset,"expiry":expiry,
+            "expiries":expiry_meta,"compare":len(expiry_meta)>1,
             "expiry_display":expiry_display,"contract_size":contract_size,
             "include_fees":include_fees,"use_mark_prices":use_mark_prices,"fee_mode":fee_mode,
             "max_combos":max_combos,

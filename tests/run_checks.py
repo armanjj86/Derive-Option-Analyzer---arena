@@ -665,6 +665,57 @@ def section_i():
           off["liquidity_filter"]["contracts_kept"] == off["liquidity_filter"]["contracts_total"])
 
 
+# ══════════════════════════════════════════════════════════════════════════
+#  J — multi-expiry comparison
+# ══════════════════════════════════════════════════════════════════════════
+def section_j():
+    section("J — Multi-expiry comparison")
+
+    status, exp = post("/api/expiries", {"asset": "BTC"})
+    dates = [e["date"] for e in exp["expiries"][:3]]
+
+    status, one = post("/api/compute", {"asset": "BTC", "expiry": dates[0],
+                                        "strategies": ["bull_call_spread"], "contract_size": 0.01})
+    check("a single expiry keeps the old response shape",
+          one["compare"] is False and one["expiry"] == dates[0] and len(one["expiries"]) == 1)
+
+    status, many = post("/api/compute", {"asset": "BTC", "expiries": dates,
+                                         "strategies": ["bull_call_spread"], "contract_size": 0.01})
+    check("three expiries come back in one request",
+          many["compare"] is True and len(many["expiries"]) == 3, str([e["date"] for e in many["expiries"]]))
+    check("each expiry reports its own date, label, days and colour slot",
+          all(e["date"] and e["display"] and e["days"] >= 1 and e["combos"] > 0
+              and e["color_index"] == i for i, e in enumerate(many["expiries"])))
+    check("every combination is tagged with the expiry it belongs to",
+          {s["expiry"] for s in many["strategies"]} == set(dates))
+    check("comparing returns the sum of the individual runs",
+          len(many["strategies"]) == sum(e["combos"] for e in many["expiries"]),
+          f"{len(many['strategies'])} combos")
+
+    by_expiry = {}
+    for s in many["strategies"]:
+        by_expiry.setdefault(s["expiry"], []).append(s)
+    check("longer tenors cost more premium for the same structure",
+          by_expiry[dates[0]][0]["t_years"] < by_expiry[dates[-1]][0]["t_years"],
+          f"{by_expiry[dates[0]][0]['t_years']:.4f}y vs {by_expiry[dates[-1]][0]['t_years']:.4f}y")
+    check("each expiry gets its own probability model",
+          len({s["t_years"] for s in many["strategies"]}) == 3)
+
+    status, duped = post("/api/compute", {"asset": "BTC", "expiries": [dates[0], dates[0], dates[1]],
+                                          "strategies": ["long_call"], "contract_size": 0.01})
+    check("duplicate expiries are collapsed", len(duped["expiries"]) == 2)
+
+    five = [e["date"] for e in exp["expiries"][:5]]
+    status, too_many = post("/api/compute", {"asset": "BTC", "expiries": five,
+                                             "strategies": ["long_call"], "contract_size": 0.01})
+    check("too many expiries are rejected with a clear message",
+          status == 400 and "at most" in str(too_many), str(too_many)[:70])
+
+    status, none = post("/api/compute", {"asset": "BTC", "expiries": [],
+                                         "strategies": ["long_call"], "contract_size": 0.01})
+    check("an empty expiry list is rejected", status == 400, str(none)[:60])
+
+
 def main():
     global EXPIRY
     try:
@@ -684,6 +735,7 @@ def main():
     section_g()
     section_h()
     section_i()
+    section_j()
 
     passed = sum(1 for _, ok, _ in _results if ok)
     failed = len(_results) - passed

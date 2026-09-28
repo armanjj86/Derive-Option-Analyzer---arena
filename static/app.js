@@ -8,6 +8,13 @@ let SEL=new Set(["protective_put"]);
 let SPOT_PRICE=0,autoTimer=null;
 let sortState={col:null,dir:0};
 let CHART_RANGE=null;   // chart zoom for this session only (never persisted)
+/* ═══ MULTI-EXPIRY COMPARISON ═══
+   The extra expiries analysed alongside the one in the dropdown. The server runs
+   them in a single request, so comparing three expiries is one round trip. */
+let CMP_EXPIRIES = [];                    // extra expiry dates (strings)
+let CMP_CHART = null;
+const CMP_COLORS = ["#3b82f6", "#22c55e", "#f59e0b", "#ec4899"];
+const MAX_COMPARE_EXPIRIES = 4;
 const ODO_MAX_ANIMATED_ROWS=20;  // rows beyond this render their numbers as plain text
 const ASSET_NAMES={BTC:"Bitcoin",ETH:"Ethereum",SOL:"Solana",XAUT:"Tether Gold",DOGE:"Dogecoin",
                    AVAX:"Avalanche",LINK:"Chainlink",ARB:"Arbitrum",OP:"Optimism",SUI:"Sui",
@@ -193,6 +200,9 @@ document.addEventListener("DOMContentLoaded",async()=>{
     onChange:()=>{
       updBtn();
       _cachedExpiry=document.getElementById("f-expiry").value||null;
+      // the primary expiry can never also be a comparison chip
+      CMP_EXPIRIES=CMP_EXPIRIES.filter(e=>e!==_cachedExpiry);
+      renderCompareChips();
       if(_cachedExpiry && SEL.size > 0 && DATA) {
         compute();
       } else if(_cachedExpiry) {
@@ -727,6 +737,8 @@ async function loadExp(){
         _cachedExpiry = r.expiries[0].date;  // cache for market data
       }
       s.disabled=false;updBtn();if(window._glassDropdowns?.expiry){window._glassDropdowns.expiry.refresh();window._glassDropdowns.expiry.setEnabled(true);}
+      CMP_EXPIRIES=CMP_EXPIRIES.filter(e=>[...s.options].some(o=>o.value===e));
+      renderCompareChips();
   }catch(e){s.innerHTML="<option>Failed</option>";showErr(e.message)}}
 function updBtn(){document.getElementById("go-btn").disabled=!document.getElementById("f-expiry").value||SEL.size===0}
 // Expiry change handled by GlassDropdown
@@ -817,13 +829,18 @@ async function compute(){
   try{
     const [r] = await Promise.all([
       (await fetch("/api/compute",{method:"POST",headers:{"Content-Type":"application/json"},
-        body:JSON.stringify({asset,expiry,strategies:ids,contract_size:cs,include_fees:SETTINGS.includeFees!==undefined?SETTINGS.includeFees:true,fee_mode:SETTINGS.feeMode||"taker",max_combos:SETTINGS.maxCombos||30,
+        body:JSON.stringify({asset,expiries:[expiry,...CMP_EXPIRIES.filter(e=>e!==expiry)],strategies:ids,contract_size:cs,include_fees:SETTINGS.includeFees!==undefined?SETTINGS.includeFees:true,fee_mode:SETTINGS.feeMode||"taker",max_combos:SETTINGS.maxCombos||30,
           max_spread_pct:SETTINGS.maxSpreadPct||0,min_open_interest:SETTINGS.minOpenInterest||0})})).json(),
       loadMarketData(),
       fetchSpot()
     ]);
     if(r.error)throw new Error(r.error);
-    DATA=r;SPOT_PRICE=r.spot;updateSizeUsd();render(r);
+    DATA=r;SPOT_PRICE=r.spot;updateSizeUsd();
+    // When comparing tenors the rows would otherwise arrive grouped by expiry;
+    // ranking by probability of profit makes the comparison readable at a glance.
+    if(r.compare && !sortState.col) sortState={col:"pop",dir:-1};
+    sortStrategies(r.strategies, sortState.col, sortState.dir);
+    render(r);
   }catch(e){
     box.innerHTML=`<div class="empty"><div class="ic">⚠️</div><div class="tt">Failed to Analyze</div><div class="tx">${e.message}</div></div>`;
     showErr(e.message);
@@ -831,11 +848,26 @@ async function compute(){
   finally{btn.disabled=false;btn.innerHTML='<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg> Analyze'}}
 
 /* SORT */
+/* Comparator shared by the header clicks and by every fresh compute(), so a
+   re-analysis keeps the ordering the header claims to be showing. */
+function sortStrategies(list, col, dir){
+  if(!col || !dir) return list;
+  return list.sort((a,b)=>{switch(col){
+    case"strategy":return dir*a.name.localeCompare(b.name);
+    case"premium":return dir*(a.net_premium-b.net_premium);
+    case"cost":return dir*(a.total_cost-b.total_cost);
+    case"maxp":return dir*((a.max_profit_inf?1e15:a.max_profit)-(b.max_profit_inf?1e15:b.max_profit));
+    case"maxl":return dir*((a.max_loss_inf?-1e15:a.max_loss)-(b.max_loss_inf?-1e15:b.max_loss));
+    case"pop":return dir*((a.pop??-1)-(b.pop??-1));
+    case"liq":return dir*(((a.liquidity?.spread_pct)??999)-((b.liquidity?.spread_pct)??999));
+    case"expiry":return dir*(((a.expiry_index??0)-(b.expiry_index??0))||((a.pop??-1)-(b.pop??-1)));
+    default:return 0;}});
+}
+
 function sortTable(col){
   if(sortState.col===col){sortState.dir=sortState.dir===0?1:sortState.dir===1?-1:0}else{sortState.col=col;sortState.dir=1}
   if(sortState.dir===0){sortState.col=null;render(DATA);return}
-  const d=sortState.dir;
-  DATA.strategies.sort((a,b)=>{switch(col){case"strategy":return d*a.name.localeCompare(b.name);case"premium":return d*(a.net_premium-b.net_premium);case"cost":return d*(a.total_cost-b.total_cost);case"maxp":return d*((a.max_profit_inf?1e15:a.max_profit)-(b.max_profit_inf?1e15:b.max_profit));case"maxl":return d*((a.max_loss_inf?-1e15:a.max_loss)-(b.max_loss_inf?-1e15:b.max_loss));case"pop":return d*((a.pop??-1)-(b.pop??-1));case"liq":return d*(((a.liquidity?.spread_pct)??999)-((b.liquidity?.spread_pct)??999));default:return 0;}});
+  sortStrategies(DATA.strategies, sortState.col, sortState.dir);
   render(DATA);}
 function sI(c){if(sortState.col!==c)return'<span class="si">↕</span>';return sortState.dir===1?'<span class="si">↑</span>':'<span class="si">↓</span>'}
 function sC(c){return sortState.col===c?"sorted":""}
@@ -997,6 +1029,38 @@ function computeLegFees(legs, spot, cs, model, mode) {
   });
 }
 
+/* Chips for every other expiry, so a strategy can be compared across tenors. */
+function renderCompareChips(){
+  const row=document.getElementById("cmp-row"), box=document.getElementById("cmp-chips");
+  const sel=document.getElementById("f-expiry");
+  if(!row||!box||!sel) return;
+  const current=sel.value;
+  const others=[...sel.options].filter(o=>o.value&&o.value!==current);
+  if(!current||!others.length){row.style.display="none";return;}
+  row.style.display="flex";
+  box.innerHTML=others.slice(0,8).map(o=>{
+    const on=CMP_EXPIRIES.includes(o.value);
+    const idx=on?CMP_EXPIRIES.indexOf(o.value)+1:0;
+    const col=CMP_COLORS[idx]||CMP_COLORS[0];
+    const label=o.textContent.replace(/\s*\(.*$/,"");
+    const dte=(o.textContent.match(/\(([^)]*)\)/)||[])[1]||"";
+    return `<span class="cmp-chip ${on?"on":""}" data-exp="${o.value}" onclick="toggleCompareExpiry('${o.value}')"
+              style="${on?`background:${col};border-color:${col}`:""}" title="Compare this expiry side by side">
+              <span class="dot"></span>${label} <span class="dte">${dte}</span></span>`;
+  }).join("");
+}
+
+function toggleCompareExpiry(date){
+  const i=CMP_EXPIRIES.indexOf(date);
+  if(i>=0) CMP_EXPIRIES.splice(i,1);
+  else{
+    if(CMP_EXPIRIES.length>=MAX_COMPARE_EXPIRIES-1){ showToast(`Compare up to ${MAX_COMPARE_EXPIRIES} expiries`); return; }
+    CMP_EXPIRIES.push(date);
+  }
+  renderCompareChips();
+  if(DATA && document.getElementById("f-expiry").value) compute();
+}
+
 /* ═══ LIQUIDITY BADGE ═══
    A combination is only useful if it can be traded: a wide bid/ask eats the edge
    on entry and zero open interest means nobody to trade out with. */
@@ -1141,6 +1205,8 @@ function render(d){
   rollOdometer(document.getElementById("s-exp"), d.expiry_display||d.expiry, 600, "spot_exp");
   rollOdometer(document.getElementById("s-cs"), d.contract_size+" "+d.asset, 500, "spot_cs");
   
+  renderComparePanel(d);
+  const comparing = !!d.compare;
   const maxLossLimit = parseFloat(document.getElementById("f-maxloss")?.value);
   let stratsToRender = d.strategies;
   if(!isNaN(maxLossLimit) && maxLossLimit > 0){
@@ -1161,6 +1227,7 @@ function render(d){
   }
 
   h+=`<div class="tbl-wrap"><div class="tbl-scroll${stratsToRender.length > 12 ? " tall" : ""}"><table><thead><tr>
+  ${comparing?`<th class="${sC('expiry')}" onclick="sortTable('expiry')">Expiry ${sI('expiry')}</th>`:""}
   <th class="${sC('strategy')}" onclick="sortTable('strategy')">Strategy ${sI('strategy')}</th><th>Contract Details</th>
   <th class="${sC('premium')}" onclick="sortTable('premium')">Net Premium ${sI('premium')}</th>
   <th class="${sC('cost')}" onclick="sortTable('cost')">Total Cost ${sI('cost')}</th>
@@ -1200,6 +1267,9 @@ function render(d){
     let dH=s.distance.length?s.distance.map((dd, di)=>`<div class="dist-item"><span class="dist-pct odo-cell" style="color:${dd.label.includes("profit")?"var(--green)":"var(--red)"}" data-key="${sKey}_dist_${di}" data-val="${dd.pct.toFixed(1)}%">${dd.pct.toFixed(1)}%</span><span class="dist-lb">${dd.label}</span></div>`).join(""):'<span class="dist-lb">—</span>';
     const delayMs = Math.min(idx * 180, 3600);
     rowsHtml.push(`<tr class="row-entry-anim" style="--row-delay:${delayMs}ms">
+    ${comparing?`<td data-label="Expiry"><span style="display:inline-flex;align-items:center;gap:6px;white-space:nowrap">
+      <span style="width:8px;height:8px;border-radius:50%;background:${CMP_COLORS[(s.expiry_index||0)%CMP_COLORS.length]}"></span>
+      <b>${s.expiry_display||s.expiry}</b><span style="color:var(--text-mute)">${s.expiry_days!==undefined?s.expiry_days+"d":""}</span></span></td>`:""}
     <td data-label="Strategy"><div style="display:flex;align-items:center;justify-content:space-between;width:100%;flex-wrap:wrap"><div style="text-align:left"><div class="strat-nm">${s.name}</div><div class="strat-dsc">${s.description}</div></div><div>${mnO}</div></div></td>
     <td data-label="Legs">${legsHtml}</td>
     <td data-label="Net Premium" class="${pC}"><span class="odo-cell" data-key="${sKey}_prem" data-val="${pT}">${pT}</span></td>
@@ -1215,6 +1285,84 @@ function render(d){
   h+="</tbody></table></div></div>";
   document.getElementById("results").innerHTML=h;
   mountRows(rowsHtml);
+}
+
+/* One payoff curve per expiry, overlaid: the best combination (highest PoP) of the
+   selected strategy for each tenor, so the effect of time is visible at a glance. */
+function renderComparePanel(d){
+  const panel=document.getElementById("cmp-panel");
+  if(!panel) return;
+  if(!d.compare||!d.expiries||d.expiries.length<2){
+    panel.style.display="none"; panel.innerHTML="";
+    if(CMP_CHART){CMP_CHART.destroy();CMP_CHART=null;}
+    return;
+  }
+  const best=d.expiries.map((e,i)=>{
+    const pool=d.strategies.filter(s=>s.expiry===e.date);
+    if(!pool.length) return null;
+    const pick=pool.reduce((a,b)=>((b.pop??-1)>(a.pop??-1)?b:a));
+    return {meta:e,strategy:pick,color:CMP_COLORS[i%CMP_COLORS.length]};
+  }).filter(Boolean);
+  if(best.length<2){panel.style.display="none";panel.innerHTML="";return;}
+
+  const topPop=Math.max(...best.map(b=>b.strategy.pop??-1));
+  panel.style.display="block";
+  panel.innerHTML=`<div class="cmp-panel">
+      <h3>📅 Expiry comparison — ${best[0].strategy.name}</h3>
+      <div class="sub">Best combination by probability of profit for each expiry, at ${d.contract_size} ${d.asset} per contract.</div>
+      <div class="cmp-chart"><canvas id="cmp-canvas"></canvas></div>
+      <div class="cmp-legend">${best.map(b=>`<span class="item">
+          <span class="swatch" style="background:${b.color}"></span>
+          <b>${b.meta.display}</b> · ${b.meta.days}d · BE ${b.strategy.breakevens.length?"$"+fmt(b.strategy.breakevens[0]):"—"}
+        </span>`).join("")}</div>
+      <div class="cmp-metrics">${best.map(b=>{
+        const s=b.strategy, isBest=(s.pop??-1)===topPop;
+        return `<div class="cmp-metric ${isBest?"cmp-best":""}">
+          <div class="hd" style="color:${b.color}">${b.meta.display} · ${b.meta.days}d ${isBest?'<span class="pct-tag pct-pos" style="margin-left:auto">Best PoP</span>':""}</div>
+          <div class="rowline"><span>PoP</span><b>${s.pop===null||s.pop===undefined?"—":s.pop.toFixed(1)+"%"}</b></div>
+          <div class="rowline"><span>${s.net_premium>=0?"Net debit":"Net credit"}</span><b>$${fmt(Math.abs(s.net_premium))}</b></div>
+          <div class="rowline"><span>Capital</span><b>$${fmt(s.total_cost)}</b></div>
+          <div class="rowline"><span>Max profit</span><b>${s.max_profit_inf?"∞":"$"+fmt(s.max_profit)}</b></div>
+          <div class="rowline"><span>Max loss</span><b>${s.max_loss_inf?"∞":"-$"+fmt(Math.abs(s.max_loss||0))}</b></div>
+          <div class="rowline"><span>Strikes</span><b>${(s.legs_detail||[]).filter(l=>l.opt_type!=="underlying").map(l=>fmtInt(l.strike)).join(" / ")||"—"}</b></div>
+        </div>`;}).join("")}</div>
+    </div>`;
+
+  const cvs=document.getElementById("cmp-canvas");
+  if(!cvs||typeof Chart==="undefined") return;
+  if(CMP_CHART){CMP_CHART.destroy();CMP_CHART=null;}
+  const spot=d.spot, cs=d.contract_size||1, range=CHART_RANGE||SETTINGS.chartRange||30;
+  const grids=best.map(b=>{
+    const legs=(b.strategy.legs_detail||[]).map(l=>({
+      direction:(l.direction==="Buy"||l.direction==="Long")?1:-1,
+      opt_type:l.opt_type,strike:l.strike,premium:l.premium}));
+    return computePnL(legs,spot,range,200,cs,b.strategy.total_fee||0);
+  });
+  const labels=grids[0].prices.map(p=>"$"+fmtInt(p));
+  const spotIdx=grids[0].prices.reduce((bi,p,i,arr)=>Math.abs(p-spot)<Math.abs(arr[bi]-spot)?i:bi,0);
+  const spotColor=getComputedStyle(document.documentElement).getPropertyValue("--spot-marker").trim()||"#7c3aed";
+  CMP_CHART=new Chart(cvs.getContext("2d"),{
+    type:"line",
+    data:{labels,datasets:[
+      ...best.map((b,i)=>({label:`${b.meta.display} (${b.meta.days}d)`,data:grids[i].pnl,
+        borderColor:b.color,borderWidth:2.5,pointRadius:0,pointHoverRadius:5,tension:.05,fill:false})),
+      {label:"Zero",data:new Array(labels.length).fill(0),borderColor:"rgba(148,163,184,.3)",
+        borderWidth:1.5,borderDash:[5,5],pointRadius:0,fill:false},
+      {label:"Spot",data:labels.map((_,i)=>i===spotIdx?0:null),borderColor:"transparent",
+        pointRadius:labels.map((_,i)=>i===spotIdx?7:0),pointBackgroundColor:spotColor,
+        pointBorderColor:"#fff",pointBorderWidth:2,fill:false}
+    ]},
+    options:{responsive:true,maintainAspectRatio:false,animation:{duration:300},
+      interaction:{mode:"index",intersect:false},
+      plugins:{legend:{display:false},
+        tooltip:{backgroundColor:"rgba(15,23,42,.95)",displayColors:true,
+          callbacks:{title:it=>"Price: $"+fmt(grids[0].prices[it[0].dataIndex]),
+            label:it=>it.datasetIndex<best.length
+              ? `${best[it.datasetIndex].meta.display}: ${it.raw>=0?"+$":"-$"}${fmt(Math.abs(it.raw))}` : null}}},
+      scales:{x:{grid:{display:false},ticks:{maxTicksLimit:8,color:"#94a3b8",font:{family:"'JetBrains Mono'",size:10}}},
+              y:{grid:{color:"rgba(148,163,184,.08)"},ticks:{color:"#94a3b8",font:{family:"'JetBrains Mono'",size:10},
+                 callback:v=>(v>=0?"$":"-$")+fmt(Math.abs(v))}}}}
+  });
 }
 
 /* ═══ ROW RENDERING (windowed above VIRTUAL_ROW_THRESHOLD) ═══
@@ -1293,7 +1441,7 @@ function paintVirtualWindow() {
   const last = Math.min(v.rows.length, first + v.visible);
   const above = first * v.rowHeight;
   const below = Math.max(0, (v.rows.length - last) * v.rowHeight);
-  const spacer = px => `<tr class="v-spacer" aria-hidden="true"><td colspan="11" style="padding:0;border:none;height:${px}px"></td></tr>`;
+  const spacer = px => `<tr class="v-spacer" aria-hidden="true"><td colspan="12" style="padding:0;border:none;height:${px}px"></td></tr>`;
   v.tbody.innerHTML = (above ? spacer(above) : "")
     + v.rows.slice(first, last).join("")
     + (below ? spacer(below) : "");

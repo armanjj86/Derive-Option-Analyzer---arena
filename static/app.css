@@ -748,3 +748,30 @@ body.zen-mode .zen-floating-bar {
   .zen-floating-bar { width: 90%; justify-content: space-between; padding: 8px 12px; box-sizing: border-box; }
   .zen-floating-bar span { font-size: 11px; }
 }
+
+/* ═══ MULTI-EXPIRY COMPARISON ═══ */
+.cmp-row{display:flex;align-items:center;gap:8px;margin-top:8px;flex-wrap:wrap}
+.cmp-lbl{font-size:10px;font-weight:800;letter-spacing:.6px;text-transform:uppercase;color:var(--text-mute)}
+.cmp-chip{display:inline-flex;align-items:center;gap:6px;padding:4px 10px;border-radius:14px;cursor:pointer;
+  border:1px solid var(--border);background:var(--bg-input);font-size:11px;font-weight:700;color:var(--text-dim);
+  transition:.15s;user-select:none}
+.cmp-chip:hover{border-color:var(--accent-l);color:var(--text)}
+.cmp-chip.on{color:#fff}
+.cmp-chip .dot{width:8px;height:8px;border-radius:50%;background:currentColor;flex-shrink:0}
+.cmp-chip .dte{opacity:.7;font-weight:600}
+.cmp-panel{border:1px solid var(--border);border-radius:12px;background:var(--bg-card);
+  backdrop-filter:blur(var(--blur));padding:16px 18px;margin-bottom:16px}
+.cmp-panel h3{font-size:14px;font-weight:800;margin:0 0 2px}
+.cmp-panel .sub{font-size:11px;color:var(--text-dim);margin-bottom:12px}
+.cmp-chart{height:300px;position:relative}
+.cmp-legend{display:flex;gap:18px;flex-wrap:wrap;justify-content:center;margin-top:12px;font-size:11px}
+.cmp-legend .item{display:flex;align-items:center;gap:7px;color:var(--text-dim)}
+.cmp-legend .swatch{width:12px;height:3px;border-radius:2px}
+.cmp-legend b{color:var(--text);font-weight:800}
+.cmp-metrics{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;margin-top:14px}
+.cmp-metric{background:var(--bg-card2);border:1px solid var(--border);border-radius:10px;padding:10px 12px}
+.cmp-metric .hd{display:flex;align-items:center;gap:6px;font-size:11px;font-weight:800;margin-bottom:6px}
+.cmp-metric .rowline{display:flex;justify-content:space-between;font-size:11px;color:var(--text-dim);padding:1px 0}
+.cmp-metric .rowline b{color:var(--text);font-family:var(--font-mono);font-weight:700}
+.cmp-best{border-color:var(--accent);box-shadow:0 0 0 1px var(--accent-bg)}
+@media (max-width:768px){.cmp-chart{height:240px}.cmp-legend{gap:10px}}

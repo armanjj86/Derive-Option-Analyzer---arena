@@ -313,7 +313,11 @@
         <label>Asset</label>
         <select id="f-asset"><option value="BTC">Loading…</option></select>
       </div>
-      <div><label>Expiry</label><select id="f-expiry" disabled><option>Loading…</option></select></div>
+      <div><label>Expiry</label><select id="f-expiry" disabled><option>Loading…</option></select>
+        <div class="cmp-row" id="cmp-row" style="display:none">
+          <span class="cmp-lbl">Compare:</span><span id="cmp-chips"></span>
+        </div>
+      </div>
       <div><label>Strategy</label><div class="chips" id="chips"></div></div>
       <div><label> </label>
         <button class="btn btn-p" id="go-btn" disabled onclick="compute()">
@@ -363,6 +367,7 @@
       <div class="spot-r"><div class="lb">Expiry</div><div style="font-size:calc(15px*var(--font-scale,1));font-weight:700" id="s-exp">—</div></div>
       <div class="spot-r"><div class="lb">Contract Size</div><div style="font-size:calc(15px*var(--font-scale,1));font-weight:700" id="s-cs">—</div></div>
     </div>
+    <div id="cmp-panel" style="display:none"></div>
     <div id="results"><div class="empty"><div class="ic">📊</div><div class="tt">Ready to Analyze</div><div class="tx">Select an asset, an expiry and one strategy, then click <b>Analyze</b>.</div></div></div>
   </main>
 </div>

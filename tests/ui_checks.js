@@ -189,6 +189,56 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   check("small result sets render every row directly",
     doc.querySelectorAll("#results tbody tr.v-spacer").length === 0);
 
+  console.log("\n────────────────────────────────────────────────────────────\n  UI — multi-expiry comparison\n────────────────────────────────────────────────────────────");
+  const expOptions = [...doc.getElementById("f-expiry").options].filter(o => o.value);
+  doc.getElementById("f-expiry").value = expOptions[0].value;
+  w.eval("renderCompareChips(); selectStrategy('bull_call_spread'); document.getElementById('f-maxloss').value='0';");
+  await w.eval("compute()");
+  await sleep(1600);
+  check("a chip is offered for every other expiry",
+    doc.querySelectorAll("#cmp-chips .cmp-chip").length >= 2,
+    `${doc.querySelectorAll("#cmp-chips .cmp-chip").length} chips`);
+  check("the comparison panel stays hidden for a single expiry",
+    doc.getElementById("cmp-panel").style.display === "none");
+
+  w.eval(`toggleCompareExpiry('${expOptions[1].value}')`);
+  await sleep(1700);
+  w.eval(`toggleCompareExpiry('${expOptions[2].value}')`);
+  await sleep(2400);
+  check("selecting extra expiries analyses them in one request",
+    w.eval("DATA.compare") === true && w.eval("DATA.expiries.length") === 3,
+    w.eval("JSON.stringify(DATA.expiries.map(e=>e.date))"));
+  check("the comparison panel appears", doc.getElementById("cmp-panel").style.display === "block");
+  const cmpChart = charts[charts.length - 1];
+  const curves = cmpChart.cfg.data.datasets.filter(ds => !["Zero", "Spot"].includes(ds.label));
+  check("one payoff curve is overlaid per expiry", curves.length === 3,
+    curves.map(c => c.label).join(" | "));
+  check("each curve has its own colour",
+    new Set(curves.map(c => c.borderColor)).size === 3);
+  check("the legend names every expiry with its breakeven",
+    doc.querySelectorAll("#cmp-panel .cmp-legend .item").length === 3 &&
+    /BE \$/.test(doc.querySelector("#cmp-panel .cmp-legend").textContent));
+  check("a metric card per expiry, with the best PoP highlighted",
+    doc.querySelectorAll("#cmp-panel .cmp-metric").length === 3 &&
+    doc.querySelectorAll("#cmp-panel .cmp-best").length === 1);
+  check("the table gains an Expiry column",
+    [...doc.querySelectorAll("#results thead th")][0].textContent.includes("Expiry"));
+  const tableExpiries = new Set([...doc.querySelectorAll('#results tbody tr [data-label="Expiry"]')]
+    .map(td => td.textContent.trim()));
+  check("rows from different expiries are interleaved by probability",
+    tableExpiries.size > 1, `${tableExpiries.size} distinct expiries visible`);
+  const pops = w.eval("JSON.stringify(DATA.strategies.slice(0,6).map(s=>s.pop))");
+  check("a re-analysis keeps the active sort applied",
+    JSON.parse(pops).every((v, i, a) => i === 0 || a[i - 1] >= v), pops);
+
+  w.eval(`toggleCompareExpiry('${expOptions[1].value}')`);
+  await sleep(1600);
+  w.eval(`toggleCompareExpiry('${expOptions[2].value}')`);
+  await sleep(1800);
+  check("turning comparison off restores the single-expiry view",
+    doc.getElementById("cmp-panel").style.display === "none" && w.eval("DATA.compare") === false);
+  w.eval("sortState={col:null,dir:0}");
+
   console.log("\n────────────────────────────────────────────────────────────\n  UI — payoff chart\n────────────────────────────────────────────────────────────");
   w.eval("openChart(0)");
   await sleep(400);

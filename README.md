@@ -204,7 +204,7 @@ Derive-Option-Analyzer/
 | `POST` | `/api/spot` | `{asset}` | قیمت لحظه‌ای از تیکر PERP |
 | `POST` | `/api/expiries` | `{asset}` | سررسیدهای فعال (≥ ۱ روز) |
 | `POST` | `/api/market` | `{asset, expiry?}` | اسپات، تغییر ۲۴h، ATM IV، DVOL، IV Rank |
-| `POST` | `/api/compute` | `{asset, expiry, strategies[], contract_size, include_fees, fee_mode, use_mark_prices, max_combos, max_spread_pct, min_open_interest}` | تحلیل کامل + دادهٔ نمودار |
+| `POST` | `/api/compute` | `{asset, expiry \| expiries[], strategies[], contract_size, include_fees, fee_mode, use_mark_prices, max_combos, max_spread_pct, min_open_interest}` | تحلیل کامل + دادهٔ نمودار (تا ۴ سررسید در یک درخواست) |
 
 <details>
 <summary><b>نمونهٔ درخواست و پاسخ <code>/api/compute</code></b></summary>
@@ -267,6 +267,7 @@ curl -X POST http://localhost:5000/api/compute \
 - **احتمال سوددهی (PoP)**: احتمال اینکه پوزیشن در سررسید سودده باشد، از مدل لاگ‌نرمال با IV همان پوزیشن
 - فیلتر زندهٔ «حداکثر زیان ٪» (۰ = غیرفعال)
 - نمودار Payoff با دامنهٔ دقیق ±۱٪ تا ±۱۰۰٪ و حالت «Fit to strikes»
+- **مقایسهٔ چند سررسید**: تا ۴ سررسید هم‌زمان، با منحنی‌های روی‌هم، کارت متریک هر سررسید و ستون Expiry
 - **برگهٔ سفارش (Order Ticket)**: جهت، مقدار، قیمت واحد، سمت دفتر سفارش (ask/bid/index)،
   نقد جابه‌جاشده و کارمزد هر لگ + ردیف جمع و دکمهٔ کپی متنی
 - Greeks پوزیشنی (ضرب‌شده در مقدار و جهت)
