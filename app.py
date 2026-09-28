@@ -371,6 +371,7 @@ def api_compute():
     try:
         body=request.json; asset=body.get("asset","BTC"); expiry=body.get("expiry")
         strategy_ids=body.get("strategies",[]); contract_size=float(body.get("contract_size",1))
+        include_fees=bool(body.get("include_fees", True))
         if not expiry: return jsonify({"error":"Select an expiry"}),400
         if not strategy_ids: return jsonify({"error":"Select at least one strategy"}),400
 
@@ -432,7 +433,26 @@ def api_compute():
                         "description":f"{dir_label} {asset} {s_val} {'Call' if opt['type']=='call' else 'Put'} ({opt['expiry_display']})",
                         "moneyness":mn})
                 if not calc_legs: continue
+
+                total_fee = 0.0
+                for ld in leg_details:
+                    if not include_fees:
+                        ld["fee"] = 0.0
+                        continue
+                    if ld["opt_type"] == "underlying":
+                        # Spot trading fee: 0.15% (15 bps) of underlying spot value
+                        fee = 0.0015 * spot * contract_size
+                    else:
+                        # Option trading fee: $0.50 base + min(0.03% of nominal spot, 12.5% of option premium)
+                        fee_per_contract = 0.50 + min(0.0003 * spot, 0.125 * ld["premium"])
+                        fee = fee_per_contract * contract_size
+                    ld["fee"] = round(fee, 2)
+                    total_fee += fee
+
                 prices,pnl,net_premium=compute_payoff(calc_legs,spot,contract_size)
+                if total_fee > 0:
+                    pnl = [round(p - total_fee, 2) for p in pnl]
+
                 valid_pnl=[p for p in pnl if not math.isinf(p) and not math.isnan(p)]
                 if not valid_pnl: continue
                 max_profit=max(valid_pnl); max_loss=min(valid_pnl)
@@ -441,10 +461,10 @@ def api_compute():
                 test_high=spot*5; test_low=spot*0.01
                 pnl_high=sum((l["direction"]*(max(test_high-l["strike"],0)-l["premium"]) if l["opt_type"]=="call"
                     else l["direction"]*(max(l["strike"]-test_high,0)-l["premium"]) if l["opt_type"]=="put"
-                    else l["direction"]*(test_high-spot))*contract_size for l in calc_legs)
+                    else l["direction"]*(test_high-spot))*contract_size for l in calc_legs) - total_fee
                 pnl_low=sum((l["direction"]*(max(test_low-l["strike"],0)-l["premium"]) if l["opt_type"]=="call"
                     else l["direction"]*(max(l["strike"]-test_low,0)-l["premium"]) if l["opt_type"]=="put"
-                    else l["direction"]*(test_low-spot))*contract_size for l in calc_legs)
+                    else l["direction"]*(test_low-spot))*contract_size for l in calc_legs) - total_fee
                 max_profit_inf = (pnl_high > max_profit * 1.5 and (pnl_high - max_profit) > 1.0) or (pnl_low > max_profit * 1.5 and (pnl_low - max_profit) > 1.0)
                 max_loss_inf = (pnl_high < max_loss * 1.5 and (max_loss - pnl_high) > 1.0) or (pnl_low < max_loss * 1.5 and (max_loss - pnl_low) > 1.0)
                 if max_loss >= -0.01:
@@ -462,6 +482,7 @@ def api_compute():
                     total_cost = underlying_cost + abs(max_loss) if max_loss != 0 else underlying_cost
                 else:  # zero premium
                     total_cost = underlying_cost if underlying_cost > 0 else (abs(max_loss) if max_loss != 0 else 1)
+                total_cost += total_fee
 
                 # Percentage: relative to total_cost
                 if total_cost > 0:
@@ -495,7 +516,7 @@ def api_compute():
                     "description":strategy["description"],"category":strategy["category"],"risk":strategy["risk"],
                     "moneyness":overall_mn,"legs":[ld["description"] for ld in leg_details],
                     "legs_detail":leg_details,"contract_size":contract_size,
-                    "net_premium":round(net_premium,2),"total_cost":round(total_cost,2),
+                    "net_premium":round(net_premium,2),"total_cost":round(total_cost,2),"total_fee":round(total_fee,2),
                     "max_profit":round(max_profit,2),"max_profit_pct":max_profit_pct,
                     "max_profit_inf":max_profit_inf,"max_loss":round(max_loss,2),
                     "max_loss_pct":max_loss_pct,"max_loss_inf":max_loss_inf,

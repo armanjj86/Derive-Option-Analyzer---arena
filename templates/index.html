@@ -15,8 +15,8 @@
   --font-mono:"JetBrains Mono",monospace;
   --bg:linear-gradient(135deg,#070b14 0%,#0d1025 25%,#0a0e1a 50%,#100a1e 75%,#080c16 100%);
   --bg-solid:#0a0e17;
-  --blur:12px;--bg-card:rgba(17,24,39,0.50);--bg-card2:rgba(26,35,50,0.55);--bg-hover:rgba(30,41,59,0.40);
-  --bg-input:rgba(15,23,42,0.45);--border:rgba(30,41,59,0.60);--border-l:rgba(51,65,85,0.50);
+  --blur:16px;--bg-card:rgba(15,23,42,0.26);--bg-card2:rgba(30,41,59,0.32);--bg-hover:rgba(51,65,85,0.35);
+  --bg-input:rgba(15,23,42,0.30);--border:rgba(30,41,59,0.60);--border-l:rgba(51,65,85,0.50);
   --text:#e2e8f0;--text-dim:#94a3b8;--text-mute:#64748b;
   --accent:#3b82f6;--accent-l:#60a5fa;--accent-bg:rgba(59,130,246,.12);
   --accent-g:linear-gradient(135deg,#3b82f6,#8b5cf6);
@@ -30,8 +30,8 @@
 [data-theme="light"]{
   --bg:linear-gradient(135deg,#f0f2f8 0%,#e8eaf5 25%,#f5f3fa 50%,#eef0f8 75%,#f2f4fc 100%);
   --bg-solid:#f8fafc;
-  --blur:12px;--bg-card:rgba(255,255,255,0.55);--bg-card2:rgba(241,245,249,0.60);--bg-hover:rgba(226,232,240,0.45);
-  --bg-input:rgba(255,255,255,0.50);--border:rgba(226,232,240,0.55);--border-l:rgba(203,213,225,0.45);
+  --blur:16px;--bg-card:rgba(255,255,255,0.38);--bg-card2:rgba(241,245,249,0.44);--bg-hover:rgba(226,232,240,0.45);
+  --bg-input:rgba(255,255,255,0.40);--border:rgba(226,232,240,0.55);--border-l:rgba(203,213,225,0.45);
   --text:#1e293b;--text-dim:#475569;--text-mute:#94a3b8;
   --accent:#6366f1;--accent-l:#818cf8;--accent-bg:rgba(99,102,241,.1);
   --accent-g:linear-gradient(135deg,#6366f1,#a78bfa);
@@ -91,6 +91,9 @@
 
 [data-palette="ocean"][data-theme="dark"], [data-palette="ocean"][data-theme="oled"], [data-palette="ocean"][data-theme="contrast"]{--accent:#06b6d4;--accent-l:#22d3ee;--accent-bg:rgba(6,182,212,.15);--accent-g:linear-gradient(135deg,#06b6d4,#3b82f6);--spot-marker:#0284c7;--bg:linear-gradient(135deg,#050a12 0%,#081220 25%,#070f1a 50%,#0a182b 75%,#060c16 100%)}
 [data-palette="ocean"][data-theme="light"]{--accent:#0284c7;--accent-l:#06b6d4;--accent-bg:rgba(2,132,199,.12);--accent-g:linear-gradient(135deg,#0284c7,#2563eb);--spot-marker:#0369a1;--bg:linear-gradient(135deg,#f0f9ff 0%,#e0f2fe 25%,#f0f9ff 50%,#e8f4fd 75%,#f2f9fe 100%)}
+
+[data-palette="cyberpunk"][data-theme="dark"], [data-palette="cyberpunk"][data-theme="oled"], [data-palette="cyberpunk"][data-theme="contrast"]{--accent:#ec4899;--accent-l:#22d3ee;--accent-bg:rgba(236,72,153,.18);--accent-g:linear-gradient(135deg,#ec4899,#06b6d4,#a855f7);--spot-marker:#ec4899;--bg:linear-gradient(135deg,#090314 0%,#130524 25%,#0c041a 50%,#1a052e 75%,#0b0216 100%)}
+[data-palette="cyberpunk"][data-theme="light"]{--accent:#db2777;--accent-l:#0891b2;--accent-bg:rgba(219,39,119,.12);--accent-g:linear-gradient(135deg,#db2777,#0891b2,#9333ea);--spot-marker:#db2777;--bg:linear-gradient(135deg,#fdf2f8 0%,#f0fdfa 25%,#faf5ff 50%,#fdf2f8 75%,#f5f3ff 100%)}
 [data-theme="oled"][data-palette]{--bg:#000000!important;--bg-solid:#000000!important;}
 [data-theme="contrast"][data-palette]{--bg:#000000!important;--bg-solid:#000000!important;}
 
@@ -107,7 +110,7 @@
 body{font-family:var(--font-ui);background:var(--bg-solid,#0a0e17);color:var(--text);
   position:relative;
   line-height:1.6;min-height:100vh;font-size:calc(14px * var(--font-scale,1));transition:background .3s,color .3s}
-body::before{content:'';position:fixed;inset:0;z-index:-1;background:var(--bg);pointer-events:none}
+body::before{content:'';position:fixed;inset:0;z-index:-2;background:var(--bg);pointer-events:none}
 [data-theme="light"] body::before{background:linear-gradient(135deg,#f0f2f8 0%,#ede9fe 30%,#f5f3fa 50%,#e0e7ff 70%,#f2f4fc 100%)}
 /* Glass card effect: top highlight + subtle shadow */
 .glass-effect{box-shadow:inset 0 1px 0 rgba(255,255,255,.08),0 4px 30px rgba(0,0,0,.15)}
@@ -290,7 +293,8 @@ input[type="number"]::-moz-spin-button{-moz-appearance:none!important}
 .btn-p:disabled{opacity:.45;cursor:not-allowed;transform:none;box-shadow:none}
 
 /* MAIN */
-.main{padding:16px 28px 40px}
+.main{padding:16px 28px 40px;position:relative;z-index:10}
+.flt-sec, .strats-tab { position:relative; z-index:10; }
 .err{padding:12px 18px;background:var(--red-bg);border:1px solid rgba(239,68,68,.3);border-radius:8px;color:var(--red);font-size:calc(13px * var(--font-scale,1));margin-bottom:14px;display:none}.err.show{display:block}
 .spot{display:none;align-items:center;gap:20px;padding:12px 20px;background:var(--bg-card);backdrop-filter:blur(var(--blur));border:1px solid var(--border);border-radius:12px;margin-bottom:16px;box-shadow:inset 0 1px 0 rgba(255,255,255,.04);transition:background .3s,backdrop-filter .3s}
 .spot .lb{font-size:calc(10px * var(--font-scale,1));color:var(--text-mute);text-transform:uppercase;letter-spacing:.5px}
@@ -457,7 +461,7 @@ tbody td{padding:12px 14px;vertical-align:middle}
 .skeleton-box{background:linear-gradient(90deg,rgba(30,41,59,0.35) 25%,rgba(51,65,85,0.7) 50%,rgba(30,41,59,0.35) 75%);background-size:1000px 100%;animation:shimmer 1.4s infinite linear;border-radius:6px;display:inline-block}
 [data-theme="light"] .skeleton-box{background:linear-gradient(90deg,rgba(226,232,240,0.55) 25%,rgba(241,245,249,0.95) 50%,rgba(226,232,240,0.55) 75%);background-size:1000px 100%}
 /* BACKGROUND ORBS */
-.bg-orbs{position:fixed;inset:0;z-index:-1;overflow:hidden;pointer-events:none}
+.bg-orbs{position:fixed;inset:0;z-index:0;overflow:hidden;pointer-events:none}
 .bg-orb{position:absolute;border-radius:50%;filter:blur(80px);opacity:0.35;transition:opacity .5s}
 .bg-orb.o1{width:600px;height:600px;top:-100px;left:-100px;background:var(--accent);transition:background .3s}
 [data-theme="light"] .bg-orb.o1{opacity:.18}
@@ -616,8 +620,144 @@ body.zen-mode .zen-floating-bar {
   color: var(--accent-l);
   font-family: var(--font-mono);
 }
-@media(max-width:1100px){.flt-row{grid-template-columns:1fr 1fr}.size-row{flex-wrap:wrap}}
-@media(max-width:700px){.hdr,.flt,.main,.strats-tab,.hdr-tabs{padding-left:14px;padding-right:14px}.flt-row{grid-template-columns:1fr}.m-grid{grid-template-columns:repeat(2,1fr)}.settings-panel{width:100%}.strat-grid{grid-template-columns:1fr}}
+/* ═══ RESPONSIVE TABLET & MOBILE STYLESHEET (INSTITUTIONAL MOBILE UX) ═══ */
+@media (max-width: 1100px) {
+  .flt-row { grid-template-columns: 1fr 1fr; }
+  .size-row { flex-wrap: wrap; }
+}
+
+@media (max-width: 768px) {
+  /* 1. Universal Layout & Padding */
+  .hdr, .flt, .main, .strats-tab { padding-left: 14px; padding-right: 14px; }
+  .hdr-tabs { padding: 0 14px; display: flex; width: 100%; box-sizing: border-box; }
+  .tab { flex: 1; text-align: center; padding: 12px 6px; font-size: 13px; }
+
+  /* 2. Top Header & Market Ticker Tape Reorganization */
+  .hdr-top { flex-direction: column; align-items: stretch; gap: 12px; padding-bottom: 8px; }
+  .hdr-l { justify-content: flex-start; width: 100%; }
+  .mkt-bar { margin: 2px 0; width: 100%; justify-content: center; box-sizing: border-box; }
+  .mkt-viewport { width: 100%; max-width: 320px; justify-content: center; }
+  .hdr-r { justify-content: flex-start; width: 100%; padding-top: 8px; border-top: 1px dashed var(--border); display: flex; align-items: center; }
+  .hdr-r .live { margin-right: auto; }
+  .hdr-r .settings-btn { margin-left: 8px; }
+
+  /* 3. Ergonomic 2x2 Filter Inputs & Full-Width Action Button */
+  .flt-row { grid-template-columns: 1fr 1fr; gap: 10px; }
+  .flt-row > div:nth-child(3) { grid-column: 1 / -1; }
+  .flt-row > div:last-child { grid-column: 1 / -1; margin-top: 4px; }
+  #go-btn { width: 100%; min-height: 48px; font-size: 15px; justify-content: center; }
+  .size-row { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  .size-row > div { width: 100%; }
+  .size-row input { width: 100%; box-sizing: border-box; }
+  .dd-btn { width: 100%; box-sizing: border-box; min-height: 42px; }
+
+  /* 4. Results Header & Summary Box Adjustments */
+  .rhdr { flex-direction: column; align-items: flex-start; gap: 10px; }
+  .combo-status-pill { width: 100%; justify-content: center; box-sizing: border-box; }
+  #spot-box { flex-direction: column; align-items: flex-start; gap: 10px; }
+  #spot-box > div { width: 100%; justify-content: space-between; display: flex; border-bottom: 1px dashed var(--border); padding-bottom: 6px; }
+  #spot-box > div:last-child { border-bottom: none; padding-bottom: 0; }
+
+  /* 5. Responsive Card-View Transformation for Strategy Table */
+  thead { display: none; }
+  tbody tr {
+    display: flex;
+    flex-direction: column;
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 16px;
+    margin-bottom: 16px;
+    padding: 0;
+    box-shadow: 0 4px 24px rgba(0, 0, 0, 0.2);
+    overflow: hidden;
+    position: relative;
+  }
+  tbody tr:last-child { margin-bottom: 0; }
+  tbody td {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 11px 16px;
+    border-bottom: 1px dashed rgba(148, 163, 184, 0.15);
+    text-align: right;
+    font-size: 13px;
+    box-sizing: border-box;
+    width: 100%;
+  }
+  tbody td:last-child { border-bottom: none; padding-bottom: 16px; }
+  tbody td::before {
+    content: attr(data-label);
+    font-size: 11px;
+    font-weight: 700;
+    color: var(--text-mute);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    margin-right: 12px;
+    flex-shrink: 0;
+  }
+  tbody td > *:not(::before) {
+    max-width: 65%;
+    text-align: right;
+    word-break: break-word;
+  }
+  /* Strategy Header Cell Styling inside Mobile Card */
+  tbody td[data-label="Strategy"] {
+    background: var(--bg-card2);
+    border-bottom: 1px solid var(--border);
+    padding: 14px 16px;
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+  tbody td[data-label="Strategy"]::before { display: none; }
+  tbody td[data-label="Strategy"] > * { max-width: 100%; }
+  tbody td[data-label="Strategy"] .strat-nm { font-size: 15px; font-weight: 900; color: var(--text); }
+  tbody td[data-label="Strategy"] .strat-dsc { font-size: 11px; max-width: 100%; margin-top: 2px; color: var(--text-dim); }
+  tbody td[data-label="Strategy"] .mn-badge { margin-top: 0; }
+  
+  /* Payoff Chart Button Cell Styling inside Mobile Card */
+  tbody td[data-label="Payoff Chart"] {
+    display: block;
+    padding: 12px 16px 16px;
+    background: rgba(148, 163, 184, 0.03);
+  }
+  tbody td[data-label="Payoff Chart"]::before { display: none; }
+  tbody td[data-label="Payoff Chart"] > * { max-width: 100%; }
+  tbody td[data-label="Payoff Chart"] .chart-btn {
+    width: 100%;
+    min-height: 44px;
+    font-size: 14px;
+    font-weight: 800;
+    justify-content: center;
+    background: var(--bg-input);
+    border: 1px solid var(--accent);
+    color: var(--accent-l);
+    box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+  }
+  tbody td[data-label="Payoff Chart"] .chart-btn:hover {
+    background: var(--accent);
+    color: #fff;
+  }
+
+  /* 6. Chart Modal & Settings Drawer Mobile Adjustments */
+  .m-grid { grid-template-columns: repeat(2, 1fr); gap: 10px; }
+  .chart-wrap { height: 280px; }
+  .chart-controls { flex-wrap: wrap; gap: 12px; justify-content: space-between; }
+  .settings-panel { width: 100%; max-width: 100%; border-radius: 0; }
+  .strat-grid { grid-template-columns: 1fr; gap: 14px; }
+}
+
+@media (max-width: 480px) {
+  .flt-row { grid-template-columns: 1fr; }
+  .size-row { grid-template-columns: 1fr; }
+  .m-grid { grid-template-columns: 1fr; }
+  .hdr h1 { font-size: 15px; }
+  .zen-floating-bar { width: 90%; justify-content: space-between; padding: 8px 12px; box-sizing: border-box; }
+  .zen-floating-bar span { font-size: 11px; }
+}
 </style>
 </head>
 <body>
@@ -626,6 +766,7 @@ body.zen-mode .zen-floating-bar {
   <span class="zen-exit-btn">✕ Exit (Alt+Z / Esc)</span>
 </div>
 <div class="bg-orbs" id="bg-orbs"><div class="bg-orb o1"></div><div class="bg-orb o2"></div><div class="bg-orb o3"></div></div>
+<canvas id="cyber-particles" style="position:fixed;inset:0;z-index:1;pointer-events:none;opacity:0;transition:opacity 0.7s ease"></canvas>
 
 <!-- HEADER -->
 <div class="hdr-grid-wrap"><div class="hdr-grid-inner">
@@ -772,13 +913,17 @@ body.zen-mode .zen-floating-bar {
             <div class="palette-circle" style="background:linear-gradient(135deg,#06b6d4,#3b82f6)"></div>
             <div class="palette-name">Ocean</div>
           </div>
+          <div class="palette-card" data-palette="cyberpunk" onclick="setPalette('cyberpunk')" title="Cyberpunk 2077 Neon">
+            <div class="palette-circle" style="background:linear-gradient(135deg,#ec4899,#22d3ee)"></div>
+            <div class="palette-name">Cyberpunk</div>
+          </div>
         </div>
       </div>
       <div class="setting-item" style="margin-top:16px">
         <div class="setting-label-row">
-          <span class="setting-label">Background Orbs</span>
+          <span class="setting-label">Background Orbs & Cyber Particles</span>
           <div style="display:flex;gap:6px">
-            <div class="theme-btn active" id="orbs-on" onclick="setOrbs(true)" style="padding:4px 12px">✨ On</div>
+            <div class="theme-btn active" id="orbs-on" onclick="setOrbs(true)" style="padding:4px 12px">✨ Orbs & Particles</div>
             <div class="theme-btn" id="orbs-off" onclick="setOrbs(false)" style="padding:4px 12px">Off</div>
           </div>
         </div>
@@ -844,6 +989,16 @@ body.zen-mode .zen-floating-bar {
         <div class="setting-label-row"><span class="setting-label">Default Max Loss Limit (%)</span></div>
         <input type="number" id="set-maxloss" class="setting-input-num" value="10" min="0" max="1000" step="1">
         <div class="setting-hint">Default maximum capital loss filter percentage (0 = show all).</div>
+      </div>
+      <div class="setting-item" style="margin-top:16px">
+        <div class="setting-label-row">
+          <span class="setting-label">Include Derive Trading Fees</span>
+          <label style="cursor:pointer;display:inline-flex;align-items:center;gap:8px">
+            <input type="checkbox" id="set-fees" checked style="width:18px;height:18px;cursor:pointer;accent-color:var(--accent)">
+            <span style="font-size:12px;font-weight:700;color:var(--text)">Enabled</span>
+          </label>
+        </div>
+        <div class="setting-hint">Include Derive Option Taker fees ($0.50 base + min(0.03% nom, 12.5% prem)) and Spot fees (0.15%).</div>
       </div>
     </div>
   </div>
@@ -951,7 +1106,7 @@ let SEL=new Set(["protective_put"]);
 let SPOT_PRICE=0,autoTimer=null;
 let sortState={col:null,dir:0};
 const DEFAULT_CS={"BTC":0.001,"ETH":0.01};
-const SETTINGS={refreshInterval:0,fontScale:1,theme:"dark",chartRange:30,blur:12,orbs:true,fontFamily:"mixed",palette:"default",maxLossFilter:10};
+const SETTINGS={refreshInterval:0,fontScale:1,theme:"dark",chartRange:30,blur:12,orbs:true,fontFamily:"mixed",palette:"default",maxLossFilter:10,includeFees:true};
 
 /* MINI CHART SVGs — shapes preserved, dual-color via clipPath (unique IDs) */
 const MINI_CHARTS={
@@ -1132,16 +1287,21 @@ function switchTab(tab){
 }
 
 /* SETTINGS */
-function loadSettings(){try{const s=JSON.parse(localStorage.getItem("d_settings"));if(s)Object.assign(SETTINGS,s);applySettings()}catch(e){}}
+function loadSettings(){try{const s=JSON.parse(localStorage.getItem("d_settings"));if(s)Object.assign(SETTINGS,s);applySettings()}catch(e){applySettings()}}
 function saveSettings(){
+  const oldFees = SETTINGS.includeFees;
   SETTINGS.chartRange=parseInt(document.getElementById("set-chartrange").value)||30;
   SETTINGS.blur=parseInt(document.getElementById("set-blur").value)||0;
   SETTINGS.refreshInterval=parseInt(document.getElementById("set-refresh").value)||0;
   SETTINGS.fontScale=parseFloat(document.getElementById("set-fontsize").value)||1;
   SETTINGS.maxLossFilter=parseFloat(document.getElementById("set-maxloss").value)||0;
+  SETTINGS.includeFees = document.getElementById("set-fees") ? document.getElementById("set-fees").checked : true;
   localStorage.setItem("d_settings",JSON.stringify(SETTINGS));applySettings();toggleSettings();
   if(autoTimer){clearInterval(autoTimer);autoTimer=null}
   if(SETTINGS.refreshInterval>0)startAutoRefresh();
+  if(oldFees !== SETTINGS.includeFees && DATA && document.getElementById("f-expiry")?.value) {
+    compute();
+  }
 }
 function applySettings(){
   document.documentElement.style.setProperty("--font-scale",SETTINGS.fontScale);
@@ -1157,6 +1317,8 @@ function applySettings(){
   document.getElementById("set-maxloss").value=SETTINGS.maxLossFilter!==undefined?SETTINGS.maxLossFilter:10;
   const fMl=document.getElementById("f-maxloss");
   if(fMl&&!fMl.dataset.userSet){fMl.value=SETTINGS.maxLossFilter!==undefined?SETTINGS.maxLossFilter:10;}
+  const sFees=document.getElementById("set-fees");
+  if(sFees){sFees.checked=SETTINGS.includeFees!==undefined?SETTINGS.includeFees:true;}
   document.getElementById("set-blur").value=SETTINGS.blur;
   document.getElementById("blur-val").textContent=SETTINGS.blur+"px";
   document.getElementById("set-fontsize").value=SETTINGS.fontScale;
@@ -1167,6 +1329,19 @@ function applySettings(){
   const orbs=document.getElementById("bg-orbs");if(orbs)orbs.classList.toggle("off",!SETTINGS.orbs);
   document.getElementById("orbs-on")?.classList.toggle("active",SETTINGS.orbs);
   document.getElementById("orbs-off")?.classList.toggle("active",!SETTINGS.orbs);
+  const pal = SETTINGS.palette || "cyberpunk";
+  const theme = SETTINGS.theme || "dark";
+  const pCvs = document.getElementById("cyber-particles");
+  if (pCvs) {
+    const isVisibleTheme = theme !== "oled" && theme !== "contrast" && SETTINGS.orbs;
+    if (isVisibleTheme) {
+      pCvs.style.opacity = theme === "light" ? "0.6" : "0.85";
+      startCyberParticles();
+    } else {
+      pCvs.style.opacity = "0";
+      stopCyberParticles();
+    }
+  }
   const ab=document.getElementById("auto-badge");
   if(SETTINGS.refreshInterval>0){ab.classList.add("on");ab.textContent=`AUTO ${SETTINGS.refreshInterval}s`}
   else ab.classList.remove("on");
@@ -1206,6 +1381,97 @@ function setPalette(p){
 }
 function setOrbs(v){SETTINGS.orbs=v;applySettings()}
 function toggleSettings(){document.getElementById("settings-overlay").classList.toggle("on");document.getElementById("settings-panel").classList.toggle("on")}
+
+/* ═══ AMBIENT CYBER PARTICLES / BOKEH DUST ENGINE ═══ */
+class CyberParticle {
+  constructor(w, h) { this.reset(w, h, true); }
+  reset(w, h, randomY = false) {
+    this.x = Math.random() * w;
+    this.y = randomY ? Math.random() * h : h + 10;
+    this.size = Math.random() * 4.5 + 2.5;
+    this.speedY = -(Math.random() * 0.45 + 0.15);
+    this.speedX = (Math.random() - 0.5) * 0.3;
+    this.alpha = Math.random() * 0.4 + 0.5;
+    this.pulseSpeed = Math.random() * 0.02 + 0.01;
+    this.pulseVal = Math.random() * Math.PI;
+    this.colorIdx = Math.floor(Math.random() * 3);
+  }
+  update(w, h) {
+    this.x += this.speedX;
+    this.y += this.speedY;
+    this.pulseVal += this.pulseSpeed;
+    if (this.y < -15 || this.x < -15 || this.x > w + 15) this.reset(w, h, false);
+  }
+  draw(ctx, colors) {
+    const color = colors[this.colorIdx] || colors[0];
+    const currentAlpha = this.alpha * (0.65 + 0.35 * Math.sin(this.pulseVal));
+    ctx.save();
+    ctx.globalAlpha = currentAlpha;
+    ctx.fillStyle = color;
+    ctx.shadowColor = color;
+    ctx.shadowBlur = this.size * 6;
+    ctx.beginPath();
+    ctx.arc(this.x, this.y, this.size, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+  }
+}
+
+function getParticleColors(pal) {
+  if (pal === "emerald") return ["#10b981", "#34d399", "#06b6d4"];
+  if (pal === "sunset") return ["#f43f5e", "#fb7185", "#fb923c"];
+  if (pal === "ocean") return ["#06b6d4", "#22d3ee", "#3b82f6"];
+  if (pal === "cyberpunk") return ["#ec4899", "#22d3ee", "#a855f7"];
+  if (pal === "gold") return ["#f59e0b", "#fbbf24", "#d97706"];
+  return ["#3b82f6", "#8b5cf6", "#60a5fa"];
+}
+
+let _cyberParticles = [];
+let _cyberRafId = null;
+let _cyberRunning = false;
+
+function initCyberParticles() {
+  const cvs = document.getElementById("cyber-particles");
+  if (!cvs) return;
+  const w = window.innerWidth;
+  const h = window.innerHeight;
+  cvs.width = w;
+  cvs.height = h;
+  const count = Math.min(50, Math.floor((w * h) / 25000));
+  _cyberParticles = [];
+  for (let i = 0; i < count; i++) _cyberParticles.push(new CyberParticle(w, h));
+}
+
+function startCyberParticles() {
+  if (_cyberRunning) return;
+  _cyberRunning = true;
+  if (!_cyberParticles.length) initCyberParticles();
+  const cvs = document.getElementById("cyber-particles");
+  if (!cvs) return;
+  const ctx = cvs.getContext("2d");
+  function loop() {
+    if (!_cyberRunning) return;
+    const w = cvs.width, h = cvs.height;
+    ctx.clearRect(0, 0, w, h);
+    const colors = getParticleColors(SETTINGS.palette || "default");
+    for (let i = 0; i < _cyberParticles.length; i++) {
+      _cyberParticles[i].update(w, h);
+      _cyberParticles[i].draw(ctx, colors);
+    }
+    _cyberRafId = requestAnimationFrame(loop);
+  }
+  _cyberRafId = requestAnimationFrame(loop);
+}
+
+function stopCyberParticles() {
+  _cyberRunning = false;
+  if (_cyberRafId) cancelAnimationFrame(_cyberRafId);
+  _cyberRafId = null;
+}
+
+window.addEventListener("resize", () => {
+  if (_cyberRunning) initCyberParticles();
+});
 
 /* ZEN / FOCUS MODE ENGINE */
 function toggleZenMode(forceState) {
@@ -1300,7 +1566,7 @@ async function loadMarketData(){
     if(r.error) throw new Error(r.error);
 
     document.querySelectorAll(".mkt-lbl-asset").forEach(el => el.textContent = r.asset);
-    document.querySelectorAll(".mkt-val-price").forEach((el, i) => rollOdometer(el, "$"+fmt(Math.round(r.spot)), 650, "mkt_price_"+i));
+    document.querySelectorAll(".mkt-val-price").forEach((el, i) => rollOdometer(el, "$"+fmt(r.spot), 650, "mkt_price_"+i));
 
     const chg = r.change_24h;
     document.querySelectorAll(".mkt-val-change").forEach((el, i) => {
@@ -1369,7 +1635,7 @@ async function fetchSpot(){
 function updateSizeUsd(){
   const cs=parseFloat(document.getElementById("f-size").value)||0;
   const el=document.getElementById("size-usd");
-  if(SPOT_PRICE>0) rollOdometer(el, "≈ $"+fmt(Math.round(cs*SPOT_PRICE)), 500); else el.textContent="≈ $—";}
+  if(SPOT_PRICE>0) rollOdometer(el, "≈ $"+fmt(cs*SPOT_PRICE), 500); else el.textContent="≈ $—";}
 
 /* CHIPS with TOOLTIPS */
 function renderChips(){
@@ -1498,7 +1764,7 @@ async function compute(){
   try{
     const [r] = await Promise.all([
       (await fetch("/api/compute",{method:"POST",headers:{"Content-Type":"application/json"},
-        body:JSON.stringify({asset,expiry,strategies:ids,contract_size:cs})})).json(),
+        body:JSON.stringify({asset,expiry,strategies:ids,contract_size:cs,include_fees:SETTINGS.includeFees!==undefined?SETTINGS.includeFees:true})})).json(),
       loadMarketData(),
       fetchSpot()
     ]);
@@ -1521,7 +1787,18 @@ function sI(c){if(sortState.col!==c)return'<span class="si">↕</span>';return s
 function sC(c){return sortState.col===c?"sorted":""}
 
 /* RENDER */
-function fmt(n){return n.toString().replace(/\B(?=(\d{3})+(?!\d))/g,",")}
+function fmt(n) {
+  if (n === undefined || n === null || isNaN(n)) return "0.00";
+  const num = typeof n === "number" ? n : parseFloat(n);
+  const parts = num.toFixed(2).split(".");
+  parts[0] = parts[0].replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+  return parts.join(".");
+}
+function fmtInt(n) {
+  if (n === undefined || n === null || isNaN(n)) return "0";
+  const num = typeof n === "number" ? n : parseFloat(n);
+  return Math.round(num).toString().replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+}
 function fmtPct(p){return(p>=0?"+":"")+p.toFixed(2)+"%"}
 const UNLIM='<span class="pct-unlim"><span class="inf">∞</span> Unlimited</span>';
 
@@ -1618,6 +1895,10 @@ function recomputeContractSize(newCS) {
     s.contract_size = newCS;
     s.net_premium *= ratio;
     s.total_cost *= ratio;
+    if (s.total_fee !== undefined) s.total_fee *= ratio;
+    if (s.legs_detail) {
+      s.legs_detail.forEach(l => { if (l.fee !== undefined) l.fee *= ratio; });
+    }
     if (!s.max_profit_inf) s.max_profit *= ratio;
     if (!s.max_loss_inf) s.max_loss *= ratio;
     if (s.pnl_chart && s.pnl_chart.pnl) {
@@ -1675,18 +1956,24 @@ function render(d){
     let mnO=s.moneyness?`<span class="mn-badge ${s.moneyness.toLowerCase()}">${s.moneyness}</span>`:"";
     const pC=s.net_premium>=0?"m-negative":"m-positive";
     const pT=s.net_premium>=0?"-$"+fmt(Math.abs(s.net_premium)):"+$"+fmt(Math.abs(s.net_premium));
-    const costStr = "$" + fmt(Math.round(s.total_cost*100)/100);
-    let mpH=s.max_profit_inf?UNLIM:`<span class="m-positive odo-cell" data-key="${sKey}_mp" data-val="$${fmt(Math.round(s.max_profit))}">${"$"+fmt(Math.round(s.max_profit))}</span>${s.max_profit_pct!==null?`<span class="pct-tag pct-pos odo-cell" data-key="${sKey}_mppct" data-val="${fmtPct(s.max_profit_pct)}">${fmtPct(s.max_profit_pct)}</span>`:""}`;
-    let mlH = s.max_loss_inf ? UNLIM : (Math.round(s.max_loss) >= 0 ? 
-      `<span class="m-neutral odo-cell" style="color:var(--green)" data-key="${sKey}_ml" data-val="$0">$0</span><span class="pct-tag odo-cell" style="background:var(--green-bg);color:var(--green)" data-key="${sKey}_mlpct" data-val="0.00%">0.00%</span>` : 
-      `<span class="m-negative odo-cell" data-key="${sKey}_ml" data-val="-$${fmt(Math.abs(Math.round(s.max_loss)))}">-$${fmt(Math.abs(Math.round(s.max_loss)))}</span>${s.max_loss_pct!==null?`<span class="pct-tag pct-neg odo-cell" data-key="${sKey}_mlpct" data-val="${fmtPct(s.max_loss_pct)}">${fmtPct(s.max_loss_pct)}</span>`:""}`);
-    const bT=s.breakevens.length?s.breakevens.map((b, bi)=>`<span class="odo-cell" data-key="${sKey}_be_${bi}" data-val="$${fmt(Math.round(b))}">${"$"+fmt(Math.round(b))}</span>`).join(", "):" —";
+    const costStr = "$" + fmt(s.total_cost);
+    let mpH=s.max_profit_inf?UNLIM:`<span class="m-positive odo-cell" data-key="${sKey}_mp" data-val="$${fmt(s.max_profit)}">${"$"+fmt(s.max_profit)}</span>${s.max_profit_pct!==null?`<span class="pct-tag pct-pos odo-cell" data-key="${sKey}_mppct" data-val="${fmtPct(s.max_profit_pct)}">${fmtPct(s.max_profit_pct)}</span>`:""}`;
+    let mlH = s.max_loss_inf ? UNLIM : (s.max_loss >= -0.001 ? 
+      `<span class="m-neutral odo-cell" style="color:var(--green)" data-key="${sKey}_ml" data-val="$0.00">$0.00</span><span class="pct-tag odo-cell" style="background:var(--green-bg);color:var(--green)" data-key="${sKey}_mlpct" data-val="0.00%">0.00%</span>` : 
+      `<span class="m-negative odo-cell" data-key="${sKey}_ml" data-val="-$${fmt(Math.abs(s.max_loss))}">-$${fmt(Math.abs(s.max_loss))}</span>${s.max_loss_pct!==null?`<span class="pct-tag pct-neg odo-cell" data-key="${sKey}_mlpct" data-val="${fmtPct(s.max_loss_pct)}">${fmtPct(s.max_loss_pct)}</span>`:""}`);
+    const bT=s.breakevens.length?s.breakevens.map((b, bi)=>`<span class="odo-cell" data-key="${sKey}_be_${bi}" data-val="$${fmt(b)}">${"$"+fmt(b)}</span>`).join(", "):" —";
     let dH=s.distance.length?s.distance.map((dd, di)=>`<div class="dist-item"><span class="dist-pct odo-cell" style="color:${dd.label.includes("profit")?"var(--green)":"var(--red)"}" data-key="${sKey}_dist_${di}" data-val="${dd.pct.toFixed(1)}%">${dd.pct.toFixed(1)}%</span><span class="dist-lb">${dd.label}</span></div>`).join(""):'<span class="dist-lb">—</span>';
     const delayMs = Math.min(idx * 180, 3600);
-    h+=`<tr class="row-entry-anim" style="--row-delay:${delayMs}ms"><td><div class="strat-nm">${s.name}</div><div class="strat-dsc">${s.description}</div>${mnO}</td>
-    <td>${legsHtml}</td><td class="${pC}"><span class="odo-cell" data-key="${sKey}_prem" data-val="${pT}">${pT}</span></td><td class="m-neutral"><span class="odo-cell" data-key="${sKey}_cost" data-val="${costStr}">${costStr}</span></td>
-    <td>${mpH}</td><td>${mlH}</td><td>${bT}</td><td class="dist-col">${dH}</td>
-    <td><button class="chart-btn" onclick="openChart(${origIdx})">📈 P&L</button></td></tr>`;
+    h+=`<tr class="row-entry-anim" style="--row-delay:${delayMs}ms">
+    <td data-label="Strategy"><div style="display:flex;align-items:center;justify-content:space-between;width:100%;flex-wrap:wrap"><div style="text-align:left"><div class="strat-nm">${s.name}</div><div class="strat-dsc">${s.description}</div></div><div>${mnO}</div></div></td>
+    <td data-label="Legs">${legsHtml}</td>
+    <td data-label="Net Premium" class="${pC}"><span class="odo-cell" data-key="${sKey}_prem" data-val="${pT}">${pT}</span></td>
+    <td data-label="Total Cost" class="m-neutral"><span class="odo-cell" data-key="${sKey}_cost" data-val="${costStr}">${costStr}</span></td>
+    <td data-label="Max Profit">${mpH}</td>
+    <td data-label="Max Loss">${mlH}</td>
+    <td data-label="Breakeven(s)">${bT}</td>
+    <td data-label="Distance to Profit" class="dist-col">${dH}</td>
+    <td data-label="Payoff Chart"><button class="chart-btn" onclick="openChart(${origIdx})">📈 P&L</button></td></tr>`;
   });h+="</tbody></table></div></div>";document.getElementById("results").innerHTML=h;
   
   document.querySelectorAll("#results tr.row-entry-anim").forEach((row, rowIdx) => {
@@ -1730,30 +2017,31 @@ function openChart(i){
   const s=DATA.strategies[i];document.getElementById("overlay").classList.add("on");
   document.getElementById("m-title").textContent=s.name+" — P&L at Expiration";
   const cs=DATA.contract_size,csLabel=cs+" "+DATA.asset;
-  const mpVL=s.max_profit_inf?"∞ Unlimited":"$"+fmt(Math.round(s.max_profit));
+  const mpVL=s.max_profit_inf?"∞ Unlimited":"$"+fmt(s.max_profit);
   const mpPct=s.max_profit_pct!==null?fmtPct(s.max_profit_pct)+" return":"Unlimited";
-  const isNoLoss = !s.max_loss_inf && Math.round(s.max_loss) >= 0;
-  const mlVL = s.max_loss_inf ? "∞ Unlimited" : (isNoLoss ? "$0" : "-$"+fmt(Math.abs(Math.round(s.max_loss))));
+  const isNoLoss = !s.max_loss_inf && s.max_loss >= -0.001;
+  const mlVL = s.max_loss_inf ? "∞ Unlimited" : (isNoLoss ? "$0.00" : "-$"+fmt(Math.abs(s.max_loss)));
   const mlPct = s.max_loss_inf ? "Unlimited" : (isNoLoss ? "0.00% (No Loss)" : (s.max_loss_pct!==null?fmtPct(s.max_loss_pct):"Unlimited"));
   document.getElementById("m-metrics").innerHTML=`
     <div class="m-card profit"><div class="lb">Max Profit</div><div class="vl">${mpVL}</div><div class="vl-pct">${mpPct}</div></div>
     <div class="m-card ${isNoLoss ? 'profit' : 'loss'}"><div class="lb">Max Loss</div><div class="vl">${mlVL}</div><div class="vl-pct">${mlPct}</div></div>
     <div class="m-card neu"><div class="lb">Spot</div><div class="vl">$${fmt(DATA.spot)}</div></div>
-    <div class="m-card ${s.net_premium>=0?'loss':'profit'}"><div class="lb">Premium (${csLabel})</div><div class="vl">${s.net_premium>=0?'-':'+'}$${fmt(Math.abs(Math.round(s.net_premium)))}</div><div class="vl-pct">${s.net_premium>=0?'Debit':'Credit'}</div></div>
-    <div class="m-card neu"><div class="lb">Capital</div><div class="vl">$${fmt(Math.round(s.total_cost))}</div></div>
-    ${s.breakevens.map(be=>`<div class="m-card neu"><div class="lb">Breakeven</div><div class="vl">$${fmt(Math.round(be))}</div></div>`).join("")}`;
+    <div class="m-card ${s.net_premium>=0?'loss':'profit'}"><div class="lb">Premium (${csLabel})</div><div class="vl">${s.net_premium>=0?'-':'+'}$${fmt(Math.abs(s.net_premium))}</div><div class="vl-pct">${s.net_premium>=0?'Debit':'Credit'}</div></div>
+    <div class="m-card neu"><div class="lb">Capital</div><div class="vl">$${fmt(s.total_cost)}</div></div>
+    ${s.total_fee > 0 ? `<div class="m-card loss"><div class="lb">Trading Fees</div><div class="vl">-$${fmt(s.total_fee)}</div><div class="vl-pct">Derive Taker/Spot</div></div>` : ""}
+    ${s.breakevens.map(be=>`<div class="m-card neu"><div class="lb">Breakeven</div><div class="vl">$${fmt(be)}</div></div>`).join("")}`;
   const ge=document.getElementById("m-greeks");
   if(s.legs_detail?.length){
-    let gh=`<h4 style="margin:16px 0 10px;color:var(--text-dim);font-size:13px;font-weight:700">Leg Details & Greeks</h4><div class="tbl-scroll"><table class="g-tbl"><thead><tr><th>Contract</th><th>Dir</th><th>MN</th><th>Expiry</th><th>Strike</th><th>Premium</th><th>Delta</th><th>Gamma</th><th>Theta</th><th>Vega</th><th>IV</th></tr></thead><tbody>`;
+    let gh=`<h4 style="margin:16px 0 10px;color:var(--text-dim);font-size:13px;font-weight:700">Leg Details & Greeks</h4><div class="tbl-scroll"><table class="g-tbl"><thead><tr><th>Contract</th><th>Dir</th><th>MN</th><th>Expiry</th><th>Strike</th><th>Premium</th>${s.total_fee > 0 ? '<th>Fee</th>' : ''}<th>Delta</th><th>Gamma</th><th>Theta</th><th>Vega</th><th>IV</th></tr></thead><tbody>`;
     s.legs_detail.forEach(l=>{const g=l.greeks||{};const mn=l.moneyness?`<span class="leg-mn ${l.moneyness.toLowerCase()}">${l.moneyness}</span>`:"—";
       const dd=(l.direction==="Buy"||l.direction==="Long")?"Buy":"Sell";
-      gh+=`<tr><td class="ln">${l.name}</td><td>${dd}</td><td>${mn}</td><td>${l.expiry_display}</td><td>${l.opt_type==='underlying'?'—':'$'+fmt(l.strike)}</td><td>${l.opt_type==='underlying'?'—':'$'+l.premium.toFixed(2)}</td><td>${g.delta!==undefined?g.delta.toFixed(4):'—'}</td><td>${g.gamma!==undefined?g.gamma.toFixed(6):'—'}</td><td>${g.theta!==undefined?g.theta.toFixed(4):'—'}</td><td>${g.vega!==undefined?g.vega.toFixed(4):'—'}</td><td>${g.iv!==undefined?(g.iv*100).toFixed(1)+'%':'—'}</td></tr>`;
+      gh+=`<tr><td class="ln">${l.name}</td><td>${dd}</td><td>${mn}</td><td>${l.expiry_display}</td><td>${l.opt_type==='underlying'?'—':'$'+fmt(l.strike)}</td><td>${l.opt_type==='underlying'?'—':'$'+l.premium.toFixed(2)}</td>${s.total_fee > 0 ? `<td style="color:var(--red);font-weight:700">-$${l.fee !== undefined ? l.fee.toFixed(2) : '0.00'}</td>` : ''}<td>${g.delta!==undefined?g.delta.toFixed(4):'—'}</td><td>${g.gamma!==undefined?g.gamma.toFixed(6):'—'}</td><td>${g.theta!==undefined?g.theta.toFixed(4):'—'}</td><td>${g.vega!==undefined?g.vega.toFixed(4):'—'}</td><td>${g.iv!==undefined?(g.iv*100).toFixed(1)+'%':'—'}</td></tr>`;
     });gh+="</tbody></table></div>";ge.innerHTML=gh}else ge.innerHTML="";
   {const rv=document.getElementById("chart-range");if(rv){rv.value=SETTINGS.chartRange||30;document.getElementById("range-val").textContent="±"+rv.value+"%"}}
   drawChart(s, parseInt(document.getElementById("chart-range")?.value) || SETTINGS.chartRange || 30);
 }
 
-function computePnL(legs, spot, rangePct = 30, steps = 300, cs = 1) {
+function computePnL(legs, spot, rangePct = 30, steps = 300, cs = 1, totalFee = 0) {
   const lo = spot * (1 - rangePct / 100);
   const hi = spot * (1 + rangePct / 100);
   const step = (hi - lo) / (steps - 1);
@@ -1772,7 +2060,7 @@ function computePnL(legs, spot, rangePct = 30, steps = 300, cs = 1) {
       else if (ot === "call") total += d * (Math.max(price - k, 0) - p);
       else if (ot === "put") total += d * (Math.max(k - price, 0) - p);
     }
-    pnl.push(total * cs);
+    pnl.push((total * cs) - totalFee);
   }
   return { prices, pnl };
 }
@@ -1805,7 +2093,7 @@ function drawChart(s, rangePct = 30) {
   let prices, pnl;
 
   if (centerSpot || rangePct !== 30 || !s.pnl_chart || !s.pnl_chart.prices) {
-    const res = computePnL(legs, spot, rangePct, 300, cs);
+    const res = computePnL(legs, spot, rangePct, 300, cs, s.total_fee || 0);
     prices = res.prices;
     pnl = res.pnl;
   } else {
@@ -1813,7 +2101,7 @@ function drawChart(s, rangePct = 30) {
     pnl = s.pnl_chart.pnl;
   }
 
-  const labels = prices.map(p => "$" + fmt(Math.round(p)));
+  const labels = prices.map(p => "$" + fmtInt(p));
 
   let si = 0, md = Infinity;
   prices.forEach((p, i) => { if (Math.abs(p - spot) < md) { md = Math.abs(p - spot); si = i; } });
@@ -1892,21 +2180,21 @@ function drawChart(s, rangePct = 30) {
             title: items => {
               const idx = items[0].dataIndex;
               const p = prices[idx];
-              return "Price: $" + fmt(Math.round(p));
+              return "Price: $" + fmt(p);
             },
             label: item => {
               if (item.datasetIndex !== 0) return null;
               const idx = item.dataIndex;
               const p = prices[idx];
               const val = pnl[idx];
-              const cap = Math.round(s.total_cost || 1);
+              const cap = s.total_cost || 1;
               const retPct = cap > 0 ? ((val / cap) * 100).toFixed(2) : "0.00";
               const movePct = (((p - spot) / spot) * 100).toFixed(2);
               const moveUsd = p - spot;
 
-              const pnlStr = "P&L:  " + (val >= 0 ? "+$" : "-$") + fmt(Math.abs(val.toFixed(2)));
+              const pnlStr = "P&L:  " + (val >= 0 ? "+$" : "-$") + fmt(Math.abs(val));
               const retStr = "Return:  " + (val >= 0 ? "+" : "") + retPct + "% of $" + fmt(cap) + " capital";
-              const moveStr = "Asset Move:  " + (movePct >= 0 ? "+" : "") + movePct + "% (" + (moveUsd >= 0 ? "+$" : "-$") + fmt(Math.abs(Math.round(moveUsd))) + ")";
+              const moveStr = "Asset Move:  " + (movePct >= 0 ? "+" : "") + movePct + "% (" + (moveUsd >= 0 ? "+$" : "-$") + fmt(Math.abs(moveUsd)) + ")";
 
               return [pnlStr, retStr, moveStr];
             }
@@ -1989,6 +2277,9 @@ async function exportStrategyCard() {
     } else if (pal === "ocean") {
       bgGrad.addColorStop(0, "#050a12"); bgGrad.addColorStop(0.5, "#070f1a"); bgGrad.addColorStop(1, "#060c16");
       ctx.fillStyle = bgGrad; ctx.fillRect(0, 0, 1920, 1080);
+    } else if (pal === "cyberpunk") {
+      bgGrad.addColorStop(0, "#090314"); bgGrad.addColorStop(0.5, "#0c041a"); bgGrad.addColorStop(1, "#0b0216");
+      ctx.fillStyle = bgGrad; ctx.fillRect(0, 0, 1920, 1080);
     } else {
       bgGrad.addColorStop(0, "#070b14"); bgGrad.addColorStop(0.5, "#0a0e1a"); bgGrad.addColorStop(1, "#080c16");
       ctx.fillStyle = bgGrad; ctx.fillRect(0, 0, 1920, 1080);
@@ -2001,6 +2292,7 @@ async function exportStrategyCard() {
         if(pal==="sunset") return ["#f43f5e", "#fb923c"];
         if(pal==="gold") return ["#f59e0b", "#d97706"];
         if(pal==="ocean") return ["#06b6d4", "#3b82f6"];
+        if(pal==="cyberpunk") return ["#ec4899", "#22d3ee"];
         return ["#3b82f6", "#8b5cf6"];
       };
       const [acc1, acc2] = getAccentHex();
@@ -2051,7 +2343,7 @@ async function exportStrategyCard() {
 
     ctx.font = "600 24px Inter, sans-serif";
     ctx.fillStyle = "#cbd5e1";
-    ctx.fillText(`Expiry: ${exp}   |   Contract Size: ${cs} ${asset}   |   Spot Price: $${fmt(Math.round(spot))}`, 64, 268);
+    ctx.fillText(`Expiry: ${exp}   |   Contract Size: ${cs} ${asset}   |   Spot Price: $${fmt(spot)}`, 64, 268);
 
     // 5. Draw 5 Metrics Boxes
     const drawMetricBox = (x, y, w, h, label, val, subVal, valColor) => {
@@ -2076,19 +2368,19 @@ async function exportStrategyCard() {
       }
     };
 
-    const mpVL = s.max_profit_inf ? "∞ Unlimited" : "$" + fmt(Math.round(s.max_profit));
+    const mpVL = s.max_profit_inf ? "∞ Unlimited" : "$" + fmt(s.max_profit);
     const mpPct = s.max_profit_pct !== null ? fmtPct(s.max_profit_pct) : "Unlimited";
-    const isNoLoss = !s.max_loss_inf && Math.round(s.max_loss) >= 0;
-    const mlVL = s.max_loss_inf ? "∞ Unlimited" : (isNoLoss ? "$0" : "-$" + fmt(Math.abs(Math.round(s.max_loss))));
+    const isNoLoss = !s.max_loss_inf && s.max_loss >= -0.001;
+    const mlVL = s.max_loss_inf ? "∞ Unlimited" : (isNoLoss ? "$0.00" : "-$" + fmt(Math.abs(s.max_loss)));
     const mlPct = s.max_loss_inf ? "Unlimited" : (isNoLoss ? "0.00% (No Loss)" : (s.max_loss_pct !== null ? fmtPct(s.max_loss_pct) : "Unlimited"));
-    const premStr = (s.net_premium >= 0 ? "-" : "+") + "$" + fmt(Math.abs(Math.round(s.net_premium)));
+    const premStr = (s.net_premium >= 0 ? "-" : "+") + "$" + fmt(Math.abs(s.net_premium));
     const premType = s.net_premium >= 0 ? "Debit" : "Credit";
-    const beStr = s.breakevens.length ? s.breakevens.map(b => "$" + fmt(Math.round(b))).join(", ") : "—";
+    const beStr = s.breakevens.length ? s.breakevens.map(b => "$" + fmt(b)).join(", ") : "—";
 
     drawMetricBox(64, 312, 336, 148, "Max Profit", mpVL, mpPct, "#22c55e");
     drawMetricBox(422, 312, 336, 148, "Max Loss", mlVL, mlPct, isNoLoss ? "#22c55e" : "#ef4444");
     drawMetricBox(780, 312, 336, 148, "Net Premium", premStr, premType, s.net_premium >= 0 ? "#ef4444" : "#22c55e");
-    drawMetricBox(1138, 312, 336, 148, "Total Capital", "$" + fmt(Math.round(s.total_cost)), cs + " " + asset, "#60a5fa");
+    drawMetricBox(1138, 312, 336, 148, "Total Capital", "$" + fmt(s.total_cost), cs + " " + asset, "#60a5fa");
     drawMetricBox(1496, 312, 360, 148, "Breakeven(s)", beStr, s.distance[0] ? s.distance[0].pct.toFixed(1) + "% away" : "", "#f8fafc");
 
     // 6. Build Dedicated 1080p Offscreen Chart.js Instance
@@ -2111,10 +2403,10 @@ async function exportStrategyCard() {
       strike: l.strike,
       premium: l.premium
     }));
-    const result = computePnL(legs, spot, rPct, 300, cs);
+    const result = computePnL(legs, spot, rPct, 300, cs, s.total_fee || 0);
     const prices = result.prices;
     const pnl = result.pnl;
-    const labels = prices.map(p => "$" + fmt(Math.round(p)));
+    const labels = prices.map(p => "$" + fmtInt(p));
     const fillAbove = pnl.map(v => v >= 0 ? v : null);
     const fillBelow = pnl.map(v => v <= 0 ? v : null);
     let si = 0, md = Infinity;
