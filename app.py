@@ -1,0 +1,663 @@
+"""
+Derive.xyz Options Strategy Analyzer — v5
+==========================================
+Fixes: capital calculation, terminal output, dropdowns, tooltips, strategies tab.
+"""
+
+import os
+import sys
+import math
+from datetime import datetime
+from flask import Flask, render_template, jsonify, request
+import requests as http_requests
+
+app = Flask(__name__)
+BASE_URL = "https://api.lyra.finance"
+MAX_COMBOS = 30
+# ═══ CACHE (expires after 5 min) ═══
+_cache = {}
+def cache_get(key, ttl=300):
+    import time
+    entry = _cache.get(key)
+    if entry and time.time() - entry["ts"] < ttl:
+        return entry["data"]
+    return None
+def cache_set(key, data):
+    import time
+    _cache[key] = {"data": data, "ts": time.time()}
+
+ATM_THRESHOLD = 0.03
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  TERMINAL OUTPUT
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class C:
+    """ANSI color codes for terminal."""
+    RESET  = "\033[0m"
+    BOLD   = "\033[1m"
+    DIM    = "\033[2m"
+    PURPLE = "\033[38;5;141m"
+    BLUE   = "\033[38;5;111m"
+    GREEN  = "\033[38;5;114m"
+    RED    = "\033[38;5;210m"
+    AMBER  = "\033[38;5;221m"
+    CYAN   = "\033[38;5;117m"
+    WHITE  = "\033[38;5;255m"
+    GRAY   = "\033[38;5;243m"
+
+def log_startup(port):
+    print(f"""
+{C.PURPLE}{C.BOLD}  ╔═══════════════════════════════════════════════════════╗
+  ║                                                       ║
+  ║   {C.CYAN}◆  Option Strategy Analyzer  v5{C.PURPLE}                   ║
+  ║   {C.DIM}Powered by Derive.xyz{C.PURPLE}                              ║
+  ║                                                       ║
+  ║   {C.GREEN}▸ Server:{C.WHITE}  http://localhost:{port}{C.PURPLE}                 ║
+  ║   {C.GREEN}▸ Status:{C.WHITE}  Running{C.GREEN} ✓{C.PURPLE}                               ║
+  ║   {C.GREEN}▸ API:{C.WHITE}     https://api.lyra.finance{C.PURPLE}           ║
+  ║                                                       ║
+  ╚═══════════════════════════════════════════════════════╝{C.RESET}
+""")
+
+def log_request(method, path, status, duration_ms=None):
+    status_color = C.GREEN if 200 <= status < 300 else C.RED if status >= 400 else C.AMBER
+    dur = f" {C.DIM}({duration_ms:.0f}ms){C.RESET}" if duration_ms else ""
+    print(f"  {C.GRAY}▸{C.RESET} {C.DIM}{method}{C.RESET} {C.WHITE}{path}{C.RESET} → {status_color}{status}{C.RESET}{dur}")
+
+def log_event(msg, level="info"):
+    icons = {"info": f"{C.BLUE}ℹ{C.RESET}", "ok": f"{C.GREEN}✓{C.RESET}",
+             "warn": f"{C.AMBER}⚠{C.RESET}", "err": f"{C.RED}✗{C.RESET}"
+    }
+    print(f"  {icons.get(level, icons['info'])} {msg}")
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  OPTION PARSING
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def parse_option_name(name):
+    parts = name.split("-")
+    if len(parts) != 4: return None
+    underlying, date_str, strike_str, opt_code = parts
+    try:
+        expiry_dt = datetime.strptime(date_str, "%Y%m%d")
+        days = (expiry_dt - datetime.utcnow()).days
+        return {"underlying":underlying,"expiry":date_str,
+                "expiry_display":expiry_dt.strftime("%b %d"),
+                "strike":float(strike_str),
+                "type":"call" if opt_code=="C" else "put",
+                "type_code":opt_code,"days_to_expiry":max(days,0)}
+    except (ValueError,IndexError): return None
+
+
+def moneyness(strike, spot, opt_type):
+    if spot <= 0: return "ATM"
+    diff = (strike - spot) / spot
+    if abs(diff) <= ATM_THRESHOLD: return "ATM"
+    if opt_type == "call": return "ITM" if diff < 0 else "OTM"
+    else: return "ITM" if diff > 0 else "OTM"
+
+
+def strategy_moneyness(leg_details, spot):
+    if spot <= 0: return "ATM"
+    net_delta = 0.0
+    for l in leg_details:
+        if l["opt_type"] == "underlying":
+            net_delta += 1.0 if l["direction"] in ("Buy","Long") else -1.0
+        else:
+            sign = 1 if l["direction"] == "Buy" else -1
+            net_delta += sign * (l["greeks"] or {}).get("delta", 0)
+    if abs(net_delta) < 0.15: return "ATM"
+    return "Bullish" if net_delta > 0 else "Bearish"
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  STRATEGIES
+# ═══════════════════════════════════════════════════════════════════════════════
+
+STRATEGIES = [
+    {"id":"protective_put","name":"Protective Put","emoji":"🛡️","category":"hedging","risk":"bullish_hedged",
+     "requires_holding":True,"market":"Bullish with downside protection",
+     "description":"Hold the underlying asset + buy a put option to protect against downside while keeping upside potential.",
+     "features":["Limited downside risk","Keeps unlimited upside","Costs the put premium","Good for uncertain markets"],
+     "legs":[{"dir":"hold","type":"underlying","strike":"SPOT"},{"dir":"buy","type":"put","strike":"STRIKE"}]},
+    {"id":"long_call","name":"Long Call","emoji":"📈","category":"single","risk":"bullish",
+     "requires_holding":False,"market":"Strongly bullish",
+     "description":"Buy a call option to profit from upward price movement with limited risk.",
+     "features":["Unlimited upside potential","Limited downside (premium only)","Leveraged exposure","Time decay hurts"],
+     "legs":[{"dir":"buy","type":"call","strike":"STRIKE"}]},
+    {"id":"long_put","name":"Long Put","emoji":"📉","category":"single","risk":"bearish",
+     "requires_holding":False,"market":"Strongly bearish",
+     "description":"Buy a put option to profit from downward price movement with limited risk.",
+     "features":["Large downside profit potential","Limited loss (premium only)","Good for hedging","Time decay hurts"],
+     "legs":[{"dir":"buy","type":"put","strike":"STRIKE"}]},
+    {"id":"covered_call","name":"Covered Call","emoji":"🛡️","category":"income","risk":"neutral_bullish",
+     "requires_holding":True,"market":"Neutral to mildly bullish",
+     "description":"Hold the underlying + sell a call to earn premium income while capping upside.",
+     "features":["Generates income","Reduces cost basis","Capped upside","Mild downside protection"],
+     "legs":[{"dir":"hold","type":"underlying","strike":"SPOT"},{"dir":"sell","type":"call","strike":"STRIKE"}]},
+    {"id":"collar","name":"Collar","emoji":"🔒","category":"hedging","risk":"bullish_hedged",
+     "requires_holding":True,"market":"Neutral hedging",
+     "description":"Hold underlying + buy OTM put + sell OTM call for low-cost downside protection.",
+     "features":["Low-cost protection","Capped upside & downside","Good for profit-locking","Zero-cost possible"],
+     "legs":[{"dir":"hold","type":"underlying","strike":"SPOT"},{"dir":"buy","type":"put","strike":"LONG"},{"dir":"sell","type":"call","strike":"SHORT"}]},
+    {"id":"bull_call_spread","name":"Bull Call Spread","emoji":"🟢","category":"spread","risk":"bullish",
+     "requires_holding":False,"market":"Moderately bullish",
+     "description":"Buy lower-strike call + sell higher-strike call for defined risk/reward.",
+     "features":["Limited profit & loss","Lower cost than long call","Defined risk/reward","Best near expiry if bullish"],
+     "legs":[{"dir":"buy","type":"call","strike":"LONG"},{"dir":"sell","type":"call","strike":"SHORT"}]},
+    {"id":"bear_put_spread","name":"Bear Put Spread","emoji":"🔴","category":"spread","risk":"bearish",
+     "requires_holding":False,"market":"Moderately bearish",
+     "description":"Buy higher-strike put + sell lower-strike put for defined risk/reward.",
+     "features":["Limited profit & loss","Lower cost than long put","Defined risk/reward","Profits from decline"],
+     "legs":[{"dir":"buy","type":"put","strike":"LONG"},{"dir":"sell","type":"put","strike":"SHORT"}]},
+    {"id":"bull_put_spread","name":"Bull Put Spread","emoji":"🟢","category":"spread","risk":"bullish",
+     "requires_holding":False,"market":"Mildly bullish (income)",
+     "description":"Sell higher put + buy lower put — a credit spread that profits if price stays above.",
+     "features":["Receives premium upfront","Limited risk","Profits from time decay","Neutral to bullish bias"],
+     "legs":[{"dir":"sell","type":"put","strike":"SHORT"},{"dir":"buy","type":"put","strike":"LONG"}]},
+    {"id":"bear_call_spread","name":"Bear Call Spread","emoji":"🔴","category":"spread","risk":"bearish",
+     "requires_holding":False,"market":"Mildly bearish (income)",
+     "description":"Sell lower call + buy higher call — a credit spread that profits if price stays below.",
+     "features":["Receives premium upfront","Limited risk","Profits from time decay","Neutral to bearish bias"],
+     "legs":[{"dir":"sell","type":"call","strike":"SHORT"},{"dir":"buy","type":"call","strike":"LONG"}]},
+    {"id":"straddle","name":"Straddle","emoji":"⚡","category":"volatility","risk":"neutral",
+     "requires_holding":False,"market":"High volatility expected",
+     "description":"Buy call + put at same strike — profit from large moves in either direction.",
+     "features":["Profits from big moves","Unlimited upside potential","Limited downside (premium)","Needs significant movement"],
+     "legs":[{"dir":"buy","type":"call","strike":"STRADDLE"},{"dir":"buy","type":"put","strike":"STRADDLE"}]},
+    {"id":"strangle","name":"Strangle","emoji":"⚡","category":"volatility","risk":"neutral",
+     "requires_holding":False,"market":"High volatility expected (cheaper)",
+     "description":"Buy OTM call + OTM put — cheaper alternative to straddle.",
+     "features":["Cheaper than straddle","Needs bigger move to profit","Unlimited upside potential","Two breakeven points"],
+     "legs":[{"dir":"buy","type":"call","strike":"LONG"},{"dir":"buy","type":"put","strike":"LONG2"}]},
+    {"id":"iron_condor","name":"Iron Condor","emoji":"🦅","category":"range","risk":"neutral",
+     "requires_holding":False,"market":"Low volatility / range-bound",
+     "description":"Sell OTM put spread + sell OTM call spread — profit when price stays in range.",
+     "features":["Profits from low volatility","Limited risk both sides","Time decay is your friend","Defined max profit/loss"],
+     "legs":[{"dir":"buy","type":"put","strike":"LONG2"},{"dir":"sell","type":"put","strike":"LONG"},{"dir":"sell","type":"call","strike":"SHORT"},{"dir":"buy","type":"call","strike":"SHORT2"}]},
+]
+
+
+def get_all_strategies(): return STRATEGIES
+def get_strategy_by_id(sid): return next((s for s in STRATEGIES if s["id"]==sid), None)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  API HELPERS
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def fetch_instruments(currency, instrument_type="option", expired=False):
+    resp = http_requests.post(f"{BASE_URL}/public/get_instruments",
+        json={"currency":currency,"expired":expired,"instrument_type":instrument_type}, timeout=15)
+    resp.raise_for_status()
+    data = resp.json()
+    if "error" in data: raise Exception(data["error"].get("message","API Error"))
+    result = data.get("result",[])
+    raw_list = result if isinstance(result,list) else result.get("instruments",[])
+    filtered = []
+    for item in raw_list:
+        name = item.get("instrument_name", "") if isinstance(item, dict) else ""
+        if name.upper().startswith(f"{currency.upper()}-") and item.get("is_active", False):
+            filtered.append(item)
+    return filtered
+
+
+def fetch_tickers(currency, expiry_date, instrument_type="option"):
+    cache_key = f"tickers_{currency}_{expiry_date}_{instrument_type}"
+    cached = cache_get(cache_key, ttl=15)
+    if cached: return cached
+    resp = http_requests.post(f"{BASE_URL}/public/get_tickers",
+        json={"currency":currency,"expiry_date":expiry_date,"instrument_type":instrument_type}, timeout=15)
+    resp.raise_for_status()
+    data = resp.json()
+    if "error" in data: raise Exception(data["error"].get("message","API Error"))
+    result = data.get("result",{})
+    tickers_dict = result.get("tickers",{})
+    tickers = []
+    for instrument_name, t in tickers_dict.items():
+        if not instrument_name.upper().startswith(f"{currency.upper()}-"):
+            continue
+        raw_op = t.get("option_pricing") or {}
+        option_pricing = {"delta":raw_op.get("d","0"),"gamma":raw_op.get("g","0"),"theta":raw_op.get("t","0"),
+            "vega":raw_op.get("v","0"),"rho":raw_op.get("r","0"),"iv":raw_op.get("i","0"),
+            "forward_price":raw_op.get("f","0"),"mark_price":raw_op.get("m","0"),
+            "discount_factor":raw_op.get("df","1"),"bid_iv":raw_op.get("bi","0"),"ask_iv":raw_op.get("ai","0")}
+        raw_st = t.get("stats") or {}
+        stats = {"oi":raw_st.get("oi","0"),"v":raw_st.get("v","0"),"c":raw_st.get("c","0"),"n":raw_st.get("n",0)}
+        tickers.append({"instrument_name":instrument_name,"best_ask_price":t.get("a","0"),
+            "best_bid_price":t.get("b","0"),"best_ask_amount":t.get("A","0"),"best_bid_amount":t.get("B","0"),
+            "index_price":t.get("I","0"),"mark_price":t.get("M","0"),
+            "option_pricing":option_pricing,"stats":stats})
+    cache_set(cache_key, tickers)
+    return tickers
+
+
+def generate_combinations(strategy, spot, calls, puts):
+    sid = strategy["id"]; combos = []
+    if sid == "long_call":
+        for opt in calls: combos.append([opt]); len(combos)>=MAX_COMBOS and combos.pop()
+    elif sid == "long_put":
+        for opt in puts: combos.append([opt]); len(combos)>=MAX_COMBOS and combos.pop()
+    elif sid in ("covered_call","protective_put"):
+        for opt in (calls if sid=="covered_call" else puts): combos.append([opt]); len(combos)>=MAX_COMBOS and combos.pop()
+    elif sid in ("bull_call_spread","bear_call_spread"):
+        for i,lo in enumerate(calls):
+            for so in calls[i+1:]:
+                if so["strike"]>lo["strike"]: combos.append([lo,so])
+                if len(combos)>=MAX_COMBOS: break
+            if len(combos)>=MAX_COMBOS: break
+    elif sid in ("bear_put_spread","bull_put_spread"):
+        for i,lo in enumerate(puts):
+            for so in puts[i+1:]:
+                if so["strike"]<lo["strike"]: combos.append([lo,so])
+                if len(combos)>=MAX_COMBOS: break
+            if len(combos)>=MAX_COMBOS: break
+    elif sid == "collar":
+        op=[p for p in puts if p["strike"]<spot]; oc=[c for c in calls if c["strike"]>spot]
+        for pp in op:
+            for cp in oc: combos.append([pp,cp]); len(combos)>=MAX_COMBOS and combos.pop()
+            if len(combos)>=MAX_COMBOS: break
+    elif sid == "straddle":
+        cm={c["strike"]:c for c in calls}; pm={p["strike"]:p for p in puts}
+        for k in sorted(set(cm)&set(pm)): combos.append([cm[k],pm[k]]); len(combos)>=MAX_COMBOS and combos.pop()
+    elif sid == "strangle":
+        oc=[c for c in calls if c["strike"]>=spot]; op=sorted([p for p in puts if p["strike"]<=spot],key=lambda x:-x["strike"])
+        for co in oc:
+            for po in op:
+                if co["strike"]!=po["strike"]: combos.append([co,po]); len(combos)>=MAX_COMBOS and combos.pop()
+            if len(combos)>=MAX_COMBOS: break
+    elif sid == "iron_condor":
+        op=sorted([p for p in puts if p["strike"]<spot],key=lambda x:-x["strike"])
+        oc=[c for c in calls if c["strike"]>spot]
+        for i,sp in enumerate(op):
+            for bp in op[i+1:]:
+                for j,sc in enumerate(oc):
+                    for bc in oc[j+1:]: combos.append([bp,sp,sc,bc]); len(combos)>=MAX_COMBOS and combos.pop()
+                    if len(combos)>=MAX_COMBOS: break
+                if len(combos)>=MAX_COMBOS: break
+            if len(combos)>=MAX_COMBOS: break
+    return combos
+
+
+def compute_payoff(legs, spot, contract_size=1, n_points=250):
+    min_k = min((l["strike"] for l in legs if l["opt_type"]!="underlying"),default=spot*0.7)
+    max_k = max((l["strike"] for l in legs if l["opt_type"]!="underlying"),default=spot*1.3)
+    lo = max(spot*0.5,min_k*0.7); hi = min(spot*2.0,max_k*1.5)
+    lo,hi = min(lo,spot*0.8),max(hi,spot*1.2)
+    step=(hi-lo)/(n_points-1); prices=[lo+i*step for i in range(n_points)]
+    net_premium=sum(l["direction"]*l["premium"] for l in legs if l["opt_type"]!="underlying")*contract_size
+    pnl=[]
+    for price in prices:
+        total=0.0
+        for l in legs:
+            d,ot,k,p=l["direction"],l["opt_type"],l["strike"],l["premium"]
+            if ot=="underlying": total+=d*(price-spot)
+            elif ot=="call": total+=d*(max(price-k,0)-p)
+            elif ot=="put": total+=d*(max(k-price,0)-p)
+        pnl.append(round(total*contract_size,2))
+    return prices,pnl,net_premium
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  ROUTES
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@app.route("/")
+def index(): return render_template("index.html")
+
+
+@app.route("/api/strategies")
+def api_strategies(): return jsonify(get_all_strategies())
+
+
+@app.route("/api/health")
+def api_health():
+    try:
+        resp = http_requests.post(f"{BASE_URL}/public/get_all_currencies",
+            headers={"accept":"application/json","content-type":"application/json"}, json={}, timeout=5)
+        if resp.status_code == 200: return jsonify({"status":"ok","api":"reachable"})
+        return jsonify({"status":"degraded","api":"unreachable"}), 503
+    except: return jsonify({"status":"down","api":"unreachable"}), 503
+
+
+@app.route("/api/spot", methods=["POST"])
+def api_spot():
+    try:
+        asset = request.json.get("asset","BTC")
+        cache_key = f"spot_{asset}"
+        cached = cache_get(cache_key, ttl=5) # 5 second spot cache
+        if cached: return jsonify({"spot":round(cached,2),"asset":asset})
+        
+        r = http_requests.post(f"{BASE_URL}/public/get_tickers",
+            json={"currency": asset, "instrument_type": "perp"}, timeout=8)
+        for name, t in r.json().get("result", {}).get("tickers", {}).items():
+            s = float(t.get("I", 0))
+            if s > 0:
+                cache_set(cache_key, s)
+                return jsonify({"spot":round(s,2),"asset":asset})
+        return jsonify({"spot":0,"asset":asset})
+    except Exception as e: return jsonify({"spot":0,"error":str(e)})
+
+
+@app.route("/api/expiries", methods=["POST"])
+def api_expiries():
+    try:
+        asset = request.json.get("asset","BTC")
+        cache_key = f"instruments_{asset}"
+        instruments = cache_get(cache_key)
+        if not instruments:
+            instruments = fetch_instruments(asset,"option",False)
+            cache_set(cache_key, instruments)
+        expiries,seen=[],set(); now = datetime.utcnow()
+        for inst in instruments:
+            if not inst.get("is_active", False): continue
+            info = parse_option_name(inst.get("instrument_name",""))
+            if info and info["underlying"].upper() == asset.upper() and info["expiry"] not in seen:
+                exp_dt = datetime.strptime(info["expiry"],"%Y%m%d"); days = (exp_dt-now).days
+                if days >= 1:
+                    expiries.append({"date":info["expiry"],"display":exp_dt.strftime("%b %d, %Y")+f" ({days}d)","days":days})
+                    seen.add(info["expiry"])
+        expiries.sort(key=lambda x:x["date"])
+        log_event(f"Loaded {len(expiries)} expiry dates for {asset}")
+        return jsonify({"expiries":expiries})
+    except Exception as e: return jsonify({"error":str(e)}),500
+
+
+@app.route("/api/compute", methods=["POST"])
+def api_compute():
+    try:
+        body=request.json; asset=body.get("asset","BTC"); expiry=body.get("expiry")
+        strategy_ids=body.get("strategies",[]); contract_size=float(body.get("contract_size",1))
+        if not expiry: return jsonify({"error":"Select an expiry"}),400
+        if not strategy_ids: return jsonify({"error":"Select at least one strategy"}),400
+
+        log_event(f"Computing {len(strategy_ids)} strategies for {asset} {expiry} (size={contract_size})")
+        tickers=fetch_tickers(asset,expiry,"option")
+        if not tickers: return jsonify({"error":f"No options for {asset} expiring {expiry}"}),404
+
+        calls,puts=[],[]; spot=0.0; expiry_display=""
+        for t in tickers:
+            info=parse_option_name(t["instrument_name"])
+            if not info or info["underlying"].upper() != asset.upper(): continue
+            if not expiry_display: expiry_display=datetime.strptime(info["expiry"],"%Y%m%d").strftime("%b %d, %Y")
+            best_ask=float(t.get("best_ask_price",0)); best_bid=float(t.get("best_bid_price",0))
+            mark_price=float(t.get("mark_price",0)); idx_price=float(t.get("index_price",0))
+            if idx_price>0: spot=idx_price
+            op=t.get("option_pricing") or {}; st=t.get("stats") or {}
+            greeks={"delta":float(op.get("delta",0)),"gamma":float(op.get("gamma",0)),
+                "theta":float(op.get("theta",0)),"vega":float(op.get("vega",0)),
+                "rho":float(op.get("rho",0)),"iv":float(op.get("iv",0))}
+            entry={"name":t["instrument_name"],"strike":info["strike"],"type":info["type"],
+                "expiry_display":info["expiry_display"],"days_to_expiry":info["days_to_expiry"],
+                "best_ask":best_ask,"best_bid":best_bid,"mark_price":mark_price,
+                "greeks":greeks,"open_interest":float(st.get("oi",0)),"volume":float(st.get("v",0))}
+            (calls if info["type"]=="call" else puts).append(entry)
+        calls.sort(key=lambda x:x["strike"]); puts.sort(key=lambda x:x["strike"])
+        if spot<=0: return jsonify({"error":"Could not determine spot price"}),500
+
+        results=[]; total_combos=0
+        for strategy_id in strategy_ids:
+            strategy=get_strategy_by_id(strategy_id)
+            if not strategy: continue
+            combos=generate_combinations(strategy,spot,calls,puts)
+            strategy_combos=0
+            for combo_opts in combos:
+                combo_copy=list(combo_opts); calc_legs=[]; leg_details=[]
+                has_underlying=False
+                for leg_def in strategy["legs"]:
+                    if leg_def["type"]=="underlying":
+                        has_underlying=True
+                        calc_legs.append({"direction":1,"opt_type":"underlying","strike":spot,"premium":0})
+                        leg_details.append({"name":f"{asset} Spot","direction":"Long","opt_type":"underlying",
+                            "strike":spot,"expiry_display":"—","premium":0,"mark_price":0,
+                            "best_ask":0,"best_bid":0,
+                            "greeks":{"delta":1,"gamma":0,"theta":0,"vega":0,"iv":0},
+                            "open_interest":0,"volume":0,"description":f"Long {asset}","moneyness":"ATM"})
+                        continue
+                    opt=combo_copy.pop(0) if combo_copy else None
+                    if not opt: break
+                    direction=1 if leg_def["dir"] in ("buy","hold") else -1
+                    dir_label="Buy" if direction>0 else "Sell"
+                    premium=opt["mark_price"] if opt["mark_price"]>0 else opt["best_ask"]
+                    mn=moneyness(opt["strike"],spot,opt["type"])
+                    calc_legs.append({"direction":direction,"opt_type":opt["type"],"strike":opt["strike"],"premium":premium})
+                    s_val=int(opt["strike"]) if opt["strike"]==int(opt["strike"]) else opt["strike"]
+                    leg_details.append({"name":opt["name"],"direction":dir_label,"opt_type":opt["type"],
+                        "strike":opt["strike"],"expiry_display":opt["expiry_display"],"premium":premium,
+                        "mark_price":opt["mark_price"],"best_ask":opt["best_ask"],"best_bid":opt["best_bid"],
+                        "greeks":opt["greeks"],"open_interest":opt["open_interest"],"volume":opt["volume"],
+                        "description":f"{dir_label} {asset} {s_val} {'Call' if opt['type']=='call' else 'Put'} ({opt['expiry_display']})",
+                        "moneyness":mn})
+                if not calc_legs: continue
+                prices,pnl,net_premium=compute_payoff(calc_legs,spot,contract_size)
+                valid_pnl=[p for p in pnl if not math.isinf(p) and not math.isnan(p)]
+                if not valid_pnl: continue
+                max_profit=max(valid_pnl); max_loss=min(valid_pnl)
+                max_profit_price=prices[pnl.index(max_profit)]; max_loss_price=prices[pnl.index(max_loss)]
+                # Unlimited detection
+                test_high=spot*5; test_low=spot*0.01
+                pnl_high=sum((l["direction"]*(max(test_high-l["strike"],0)-l["premium"]) if l["opt_type"]=="call"
+                    else l["direction"]*(max(l["strike"]-test_high,0)-l["premium"]) if l["opt_type"]=="put"
+                    else l["direction"]*(test_high-spot))*contract_size for l in calc_legs)
+                pnl_low=sum((l["direction"]*(max(test_low-l["strike"],0)-l["premium"]) if l["opt_type"]=="call"
+                    else l["direction"]*(max(l["strike"]-test_low,0)-l["premium"]) if l["opt_type"]=="put"
+                    else l["direction"]*(test_low-spot))*contract_size for l in calc_legs)
+                max_profit_inf = (pnl_high > max_profit * 1.5 and (pnl_high - max_profit) > 1.0) or (pnl_low > max_profit * 1.5 and (pnl_low - max_profit) > 1.0)
+                max_loss_inf = (pnl_high < max_loss * 1.5 and (max_loss - pnl_high) > 1.0) or (pnl_low < max_loss * 1.5 and (max_loss - pnl_low) > 1.0)
+                if max_loss >= -0.01:
+                    max_loss = 0.0
+                    max_loss_inf = False
+                if max_profit <= 0.01 and not max_profit_inf:
+                    max_profit = 0.0
+
+                # ═══ CAPITAL CALCULATION FIX ═══
+                # Include underlying cost for strategies that hold the asset
+                underlying_cost = spot * contract_size if has_underlying else 0
+                if net_premium > 0:  # debit
+                    total_cost = underlying_cost + net_premium
+                elif net_premium < 0:  # credit — underlying cost minus credit received
+                    total_cost = underlying_cost + abs(max_loss) if max_loss != 0 else underlying_cost
+                else:  # zero premium
+                    total_cost = underlying_cost if underlying_cost > 0 else (abs(max_loss) if max_loss != 0 else 1)
+
+                # Percentage: relative to total_cost
+                if total_cost > 0:
+                    if max_profit_inf: max_profit_pct = None
+                    else:
+                        raw = max_profit / total_cost * 100
+                        max_profit_pct = round(min(raw,999.9),2) if abs(raw)>500 else round(raw,2)
+                    if max_loss_inf: max_loss_pct = None
+                    elif max_loss >= -0.01: max_loss_pct = 0.0
+                    else:
+                        raw = max_loss / total_cost * 100
+                        max_loss_pct = round(max(raw,-999.9),2) if abs(raw)>500 else round(raw,2)
+                else:
+                    max_profit_pct=None; max_loss_pct=0.0 if max_loss >= -0.01 else None
+
+                # Breakevens
+                breakevens=[]
+                for i in range(len(pnl)-1):
+                    if pnl[i]*pnl[i+1]<0:
+                        x0,x1=prices[i],prices[i+1]; y0,y1=pnl[i],pnl[i+1]
+                        if y1!=y0: breakevens.append(round(x0+(0-y0)*(x1-x0)/(y1-y0),2))
+                distance_info=[]
+                for be in breakevens:
+                    dist_pct=round((be-spot)/spot*100,2)
+                    if dist_pct>0: distance_info.append({"price":be,"pct":dist_pct,"label":"↑ to profit"})
+                    else: distance_info.append({"price":be,"pct":abs(dist_pct),"label":"↓ to profit"})
+
+                net_premium=options_only_premium = sum(l["direction"]*l["premium"] for l in calc_legs if l["opt_type"]!="underlying")*contract_size
+                overall_mn=strategy_moneyness(leg_details,spot)
+                results.append({"id":strategy["id"],"name":f"{strategy['emoji']} {strategy['name']}",
+                    "description":strategy["description"],"category":strategy["category"],"risk":strategy["risk"],
+                    "moneyness":overall_mn,"legs":[ld["description"] for ld in leg_details],
+                    "legs_detail":leg_details,"contract_size":contract_size,
+                    "net_premium":round(net_premium,2),"total_cost":round(total_cost,2),
+                    "max_profit":round(max_profit,2),"max_profit_pct":max_profit_pct,
+                    "max_profit_inf":max_profit_inf,"max_loss":round(max_loss,2),
+                    "max_loss_pct":max_loss_pct,"max_loss_inf":max_loss_inf,
+                    "max_profit_price":round(max_profit_price,2),"max_loss_price":round(max_loss_price,2),
+                    "breakevens":breakevens,"distance":distance_info,
+                    "pnl_chart":{"prices":[round(p,2) for p in prices],"pnl":pnl,"spot":round(spot,2),"breakevens":breakevens}})
+                strategy_combos+=1
+            total_combos+=strategy_combos
+
+        if not results: return jsonify({"error":"No strategies could be computed."}),404
+        log_event(f"Computed {total_combos} combinations across {len(strategy_ids)} strategies","ok")
+        return jsonify({"spot":round(spot,2),"asset":asset,"expiry":expiry,
+            "expiry_display":expiry_display,"contract_size":contract_size,"strategies":results})
+    except http_requests.exceptions.ConnectionError: return jsonify({"error":"Cannot connect to Derive API."}),503
+    except http_requests.exceptions.Timeout: return jsonify({"error":"API timeout."}),504
+    except Exception as e: log_event(f"Error: {str(e)}","err"); return jsonify({"error":f"Error: {str(e)}"}),500
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  REQUEST LOGGING MIDDLEWARE
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@app.before_request
+def before_request():
+    import time
+    request._start_time = time.time()
+
+@app.after_request
+def after_request(response):
+    import time
+    if hasattr(request, '_start_time'):
+        duration = (time.time() - request._start_time) * 1000
+        log_request(request.method, request.path, response.status_code, duration)
+    return response
+
+
+
+
+@app.route("/api/market", methods=["POST"])
+def api_market():
+    """Market stats — all API calls in PARALLEL for max speed."""
+    try:
+        import concurrent.futures
+        body = request.json or {}
+        asset = body.get("asset", "BTC")
+        cached_expiry = body.get("expiry", None)
+
+        # Find expiry if not cached
+        expiry = cached_expiry
+        if not expiry:
+            cache_key = f"instruments_{asset}"
+            instruments = cache_get(cache_key)
+            if not instruments:
+                instruments = fetch_instruments(asset, "option", False)
+                cache_set(cache_key, instruments)
+            now = datetime.utcnow()
+            for inst in instruments:
+                parts = inst.get("instrument_name", "").split("-")
+                if len(parts) >= 2:
+                    try:
+                        exp_dt = datetime.strptime(parts[1], "%Y%m%d")
+                        if (exp_dt - now).days >= 1:
+                            expiry = parts[1]
+                            break
+                    except:
+                        continue
+
+        # ── Run 3 API calls in PARALLEL ──
+        def fetch_spot():
+            try:
+                r = http_requests.post(f"{BASE_URL}/public/get_tickers",
+                    json={"currency": asset, "instrument_type": "perp"}, timeout=8)
+                for name, t in r.json().get("result", {}).get("tickers", {}).items():
+                    s = float(t.get("I", 0))
+                    if s > 0:
+                        return s
+            except:
+                pass
+            return 0
+
+        def fetch_iv():
+            if not expiry:
+                return []
+            try:
+                tickers = fetch_tickers(asset, expiry, "option")
+                iv_data = []
+                for name, t in (tickers.items() if isinstance(tickers, dict) else
+                                [(x.get("instrument_name", ""), x) for x in tickers]):
+                    if not name.upper().startswith(f"{asset.upper()}-"):
+                        continue
+                    parts = name.split("-")
+                    if len(parts) < 4:
+                        continue
+                    op = t.get("option_pricing") or {}
+                    iv = float(op.get("iv", 0))
+                    try:
+                        strike = float(parts[2])
+                    except:
+                        continue
+                    if iv > 0:
+                        iv_data.append({"strike": strike, "iv": iv})
+                return iv_data
+            except:
+                return []
+
+        def fetch_currencies():
+            cached = cache_get("currencies", ttl=300)
+            if cached:
+                return cached
+            try:
+                resp = http_requests.post(f"{BASE_URL}/public/get_all_currencies",
+                    headers={"accept": "application/json", "content-type": "application/json"},
+                    json={}, timeout=8)
+                data = resp.json().get("result", [])
+                cache_set("currencies", data)
+                return data
+            except:
+                return []
+
+        # Execute all 3 in parallel
+        with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
+            f_spot = executor.submit(fetch_spot)
+            f_iv = executor.submit(fetch_iv)
+            f_curr = executor.submit(fetch_currencies)
+            spot = f_spot.result()
+            iv_data = f_iv.result()
+            currencies = f_curr.result()
+
+        # Process results
+        spot_24h = 0
+        for c in currencies:
+            if isinstance(c, dict) and c.get("currency") == asset:
+                spot_24h = float(c.get("spot_price_24h", 0))
+                if spot <= 0:
+                    spot = float(c.get("spot_price", 0))
+                break
+
+        dvol = 0
+        iv_rank = 0
+        atm_iv = 0
+        if iv_data and spot > 0:
+            atm = min(iv_data, key=lambda x: abs(x["strike"] - spot))
+            atm_iv = atm["iv"]
+            all_ivs = sorted([d["iv"] for d in iv_data])
+            below = sum(1 for iv in all_ivs if iv <= atm_iv)
+            iv_rank = round(below / len(all_ivs) * 100) if all_ivs else 0
+            dvol = round(atm_iv * 100, 1)
+
+        return jsonify({
+            "asset": asset,
+            "spot": round(spot, 2),
+            "spot_24h": round(spot_24h, 2),
+            "change_24h": round((spot - spot_24h) / spot_24h * 100, 2) if spot_24h > 0 else 0,
+            "dvol": dvol,
+            "iv_rank": iv_rank,
+            "atm_iv": round(atm_iv * 100, 1),
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT",5000))
+    log_startup(port)
+    app.run(host="0.0.0.0",port=port,debug=True)
